@@ -9,7 +9,7 @@
 
 > The first open-source tool that tests across telephony, CRM UI, and backend records simultaneously — no mocks, no stubs, real calls.
 
-https://github.com/user-attachments/assets/demo-placeholder
+[**Watch the Demo Video**](https://github.com/snehalsurti12/audrique/releases/download/v0.1.0/full-demo.webm) (3m51s, 5MB WebM)
 
 *Demo: Scenario Studio builds 3 test scenarios, then executes them live against Salesforce + Amazon Connect with parallel video capture.*
 
