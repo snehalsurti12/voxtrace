@@ -9,9 +9,9 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# Copy package files and install dependencies
+# Copy package files and install all dependencies (including Playwright)
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && \
+RUN npm ci && \
     npx playwright install chromium --with-deps
 
 # Copy application code
