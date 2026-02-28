@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { isDeclarativeSuite, scenarioToEnv, printBridgeMapping } from "./scenario-bridge.mjs";
+import { loadVocabularyEnv, loadSystemSettingsEnv } from "./vocabularyLoader.mjs";
 
 const DEFAULT_SUITE_FILE = "scenarios/e2e/full-suite.json";
 const DEFAULT_RESULTS_ROOT = path.resolve(process.cwd(), "test-results", "e2e-suite");
@@ -35,7 +36,11 @@ async function main() {
   const suiteStartedAt = Date.now();
 
   const suiteIsV2 = isDeclarativeSuite(suite);
+  const systemEnv = loadSystemSettingsEnv();
   console.log(`E2E suite: ${suiteName}`);
+  if (Object.keys(systemEnv).length > 0) {
+    console.log(`System settings: ${Object.keys(systemEnv).length} values from instances/system-settings.json`);
+  }
   console.log(`Suite config: ${suiteFile}`);
   console.log(`Suite format: ${suiteIsV2 ? "v2 (declarative steps)" : "v1 (env overrides)"}`);
   console.log(`Results root: ${runDir}`);
@@ -95,9 +100,12 @@ async function main() {
 
     // Auto-detect v2 declarative format vs v1 env-var format.
     const isV2 = isDeclarativeSuite(suite);
+    // Load org vocabulary as default env vars (scenario overrides win).
+    const profileId = process.env.INSTANCE || suite.connectionSetId || "personal";
+    const vocabEnv = loadVocabularyEnv(profileId, suite);
     const expandedEnv = isV2
       ? scenarioToEnv(scenario, suite.defaults)
-      : expandScenarioEnv(scenario.env ?? {}, process.env);
+      : expandScenarioEnv(scenario.env ?? {}, { ...process.env, ...vocabEnv });
     const playwrightArgs = Array.isArray(scenario.playwrightArgs)
       ? scenario.playwrightArgs.map((value) => String(value))
       : [];
@@ -117,6 +125,8 @@ async function main() {
     if (!dryRun) {
       const testEnv = {
         ...process.env,
+        ...systemEnv,
+        ...vocabEnv,
         ...expandedEnv,
         PW_VIDEO_MODE: process.env.PW_VIDEO_MODE || "on"
       };

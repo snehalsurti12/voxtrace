@@ -1,5 +1,16 @@
 import fs from "node:fs";
 import type { Browser, BrowserContext, Locator, Page } from "@playwright/test";
+import {
+  injectIvrAudioInterceptor,
+  waitForAudioReady,
+  navigateIvrWithSpeechDetection,
+  saveIvrRecording,
+  saveIvrNavigationResult,
+  type IvrStep,
+  type IvrNavigationResult,
+} from "./ivrSpeechDetector.js";
+
+export type { IvrStep, IvrNavigationResult };
 
 export interface ConnectCcpDialInput {
   browser: Browser;
@@ -13,6 +24,20 @@ export interface ConnectCcpDialInput {
   dtmfInterDigitDelayMs?: number;
   dtmfPostDelayMs?: number;
   videoDir?: string;
+  /** IVR navigation mode: "timed" (legacy) or "speech" (silence-detection). Default "timed". */
+  ivrMode?: "timed" | "speech";
+  /** Ordered IVR steps for speech mode. Falls back to wrapping dtmfDigits. */
+  ivrSteps?: IvrStep[];
+  /** Silence threshold in dB for speech detection. Default -45. */
+  ivrSilenceThresholdDb?: number;
+  /** Min silence (ms) to consider prompt finished. Default 800. */
+  ivrSilenceMinMs?: number;
+  /** Min speech (ms) to confirm prompt started. Default 300. */
+  ivrSpeechMinMs?: number;
+  /** Max seconds to wait per IVR prompt. Default 30. */
+  ivrMaxPromptWaitSec?: number;
+  /** Save IVR audio recording for post-hoc transcription. Default false. */
+  ivrSaveRecording?: boolean;
 }
 
 export interface ConnectCcpSession {
@@ -20,6 +45,10 @@ export interface ConnectCcpSession {
   page: Page;
   videoPath?: string;
   dialStartedAtMs?: number;
+  /** IVR navigation result (speech mode only). */
+  ivrResult?: IvrNavigationResult;
+  /** Path to saved IVR audio recording. */
+  ivrAudioPath?: string;
   end: () => Promise<void>;
 }
 
@@ -29,6 +58,8 @@ export async function dialFromConnectCcp(input: ConnectCcpDialInput): Promise<Co
       `Connect storage state not found: ${input.storageStatePath}. Run instance:auth:connect first.`
     );
   }
+
+  const useSpeechMode = input.ivrMode === "speech";
 
   const context = await input.browser.newContext({
     storageState: input.storageStatePath,
@@ -43,6 +74,15 @@ export async function dialFromConnectCcp(input: ConnectCcpDialInput): Promise<Co
       : {})
   });
   const page = await context.newPage();
+
+  // Inject audio interceptor BEFORE navigating so it patches RTCPeerConnection
+  // before the CCP page creates its WebRTC connection.
+  if (useSpeechMode) {
+    await injectIvrAudioInterceptor(page, {
+      silenceThresholdDb: input.ivrSilenceThresholdDb,
+    });
+  }
+
   await page.goto(input.ccpUrl, { waitUntil: "domcontentloaded" });
   await waitForCcpReady(page, 45_000);
   await ensureAgentAvailable(page, 20_000);
@@ -66,7 +106,68 @@ export async function dialFromConnectCcp(input: ConnectCcpDialInput): Promise<Co
   const dialTimeoutMs = input.dialTimeoutMs ?? 15_000;
   const dialStartedAtMs = await waitForDialStart(page, dialTimeoutMs, input.to);
   const dtmfDigits = normalizeDtmfDigits(input.dtmfDigits ?? "");
-  if (dtmfDigits) {
+
+  let ivrResult: IvrNavigationResult | undefined;
+  let ivrAudioPath: string | undefined;
+
+  if (useSpeechMode) {
+    // ── Speech-driven IVR navigation ──
+    // Build step list: prefer explicit ivrSteps, fall back to wrapping dtmfDigits
+    let steps: IvrStep[] = input.ivrSteps ?? [];
+    if (steps.length === 0 && dtmfDigits) {
+      steps = [...dtmfDigits].map((d) => ({ dtmf: d }));
+    }
+
+    if (steps.length > 0) {
+      await waitForConnectedCallReadyForDtmf(page, 15_000);
+      await waitForCallElapsedAtLeast(
+        page,
+        Math.max(0, Math.floor(input.dtmfMinCallElapsedSec ?? 8)),
+        30_000
+      );
+
+      // Wait for the audio interceptor to capture the remote track
+      const audioReady = await waitForAudioReady(page, 15_000);
+      if (!audioReady) {
+        console.warn(
+          "[IVR-Speech] Audio interceptor not ready — falling back to timed DTMF."
+        );
+        // Fallback to timed mode
+        await page.waitForTimeout(Math.max(0, input.dtmfInitialDelayMs ?? 0));
+        await sendDtmfSequence(page, dtmfDigits, Math.max(40, input.dtmfInterDigitDelayMs ?? 420));
+        await page.waitForTimeout(Math.max(0, input.dtmfPostDelayMs ?? 1200));
+      } else {
+        ivrResult = await navigateIvrWithSpeechDetection(
+          page,
+          steps,
+          async (p, digits) => {
+            await openDtmfSurfaceIfPresent(p);
+            await sendDtmfSequence(p, digits, Math.max(40, input.dtmfInterDigitDelayMs ?? 420));
+          },
+          {
+            silenceMinMs: input.ivrSilenceMinMs,
+            speechMinMs: input.ivrSpeechMinMs,
+            maxPromptWaitSec: input.ivrMaxPromptWaitSec,
+          }
+        );
+      }
+
+      // Save IVR audio recording if requested
+      if (input.ivrSaveRecording || input.ivrSteps?.some((s) => s.expect)) {
+        const artifactDir = input.videoDir || "test-results";
+        ivrAudioPath = await saveIvrRecording(page, artifactDir);
+        if (ivrResult) {
+          ivrResult.audioRecordingPath = ivrAudioPath;
+          saveIvrNavigationResult(ivrResult, artifactDir);
+        }
+      }
+
+      await page
+        .screenshot({ path: "test-results/connect-ccp-dtmf-sent.png", fullPage: true })
+        .catch(() => undefined);
+    }
+  } else if (dtmfDigits) {
+    // ── Timed DTMF (legacy, unchanged) ──
     await waitForConnectedCallReadyForDtmf(page, 15_000);
     await waitForCallElapsedAtLeast(page, Math.max(0, Math.floor(input.dtmfMinCallElapsedSec ?? 8)), 30_000);
     await page.waitForTimeout(Math.max(0, input.dtmfInitialDelayMs ?? 0));
@@ -80,6 +181,8 @@ export async function dialFromConnectCcp(input: ConnectCcpDialInput): Promise<Co
     page,
     videoPath: undefined,
     dialStartedAtMs,
+    ivrResult,
+    ivrAudioPath,
     end: async () => {
       await endCallIfPresent(page);
       const video = page.video();
@@ -391,25 +494,29 @@ async function hasReadyDialControls(page: Page): Promise<boolean> {
   return false;
 }
 
-async function resolveEnabledCallButton(page: Page) {
-  const candidates = [
-    page.getByRole("button", { name: /^call$/i }).first(),
-    page.getByRole("button", { name: /place call|dial/i }).first(),
-    page.locator("button[title*='Call' i], button[aria-label*='Call' i]").first()
-  ];
-  for (const button of candidates) {
-    if ((await button.count()) === 0) {
-      continue;
+async function resolveEnabledCallButton(page: Page, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const candidates = [
+      page.getByRole("button", { name: /^call$/i }).first(),
+      page.getByRole("button", { name: /place call|dial/i }).first(),
+      page.locator("button[title*='Call' i], button[aria-label*='Call' i]").first()
+    ];
+    for (const button of candidates) {
+      if ((await button.count()) === 0) {
+        continue;
+      }
+      const visible = await button.isVisible().catch(() => false);
+      if (!visible) {
+        continue;
+      }
+      const disabled = await button.isDisabled().catch(() => true);
+      if (disabled) {
+        continue;
+      }
+      return button;
     }
-    const visible = await button.isVisible().catch(() => false);
-    if (!visible) {
-      continue;
-    }
-    const disabled = await button.isDisabled().catch(() => true);
-    if (disabled) {
-      continue;
-    }
-    return button;
+    await page.waitForTimeout(300);
   }
   throw new Error("No enabled Call button found in Connect CCP dialer.");
 }
@@ -521,7 +628,12 @@ async function endCallIfPresent(page: Page): Promise<void> {
 }
 
 function normalizeDialNumber(rawNumber: string): string {
-  return rawNumber.trim().replace(/[^\d]/g, "");
+  const trimmed = rawNumber.trim();
+  // Preserve leading '+' for E.164 format (e.g. "+18775551234").
+  // Connect CCP rejects digit-only numbers as "not in E.164 format".
+  const hasPlus = trimmed.startsWith("+");
+  const digits = trimmed.replace(/[^\d]/g, "");
+  return hasPlus ? `+${digits}` : digits;
 }
 
 function normalizeDtmfDigits(rawDigits: string): string {

@@ -69,6 +69,56 @@ function sendJson(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
+function getDefaultSystemSettings() {
+  return {
+    callHandling: {
+      VOICE_RING_TIMEOUT_SEC: 75,
+      VOICE_POST_ACCEPT_HOLD_SEC: 6,
+      PREFLIGHT_DETAIL_HOLD_SEC: 2,
+      PROVIDER_LOGIN_TIMEOUT_SEC: 60,
+      PROVIDER_SYNC_WAIT_SEC: 20,
+      CONNECT_DIAL_TIMEOUT_SEC: 20,
+    },
+    supervisor: {
+      SUPERVISOR_QUEUE_WAIT_TIMEOUT_SEC: 90,
+      OFFER_AFTER_QUEUE_TIMEOUT_SEC: 90,
+      OBSERVER_FINALIZE_WAIT_SEC: 5,
+      SUPERVISOR_POST_QUEUE_HOLD_SEC: 2,
+      SUPERVISOR_BEFORE_ACCEPT_WAIT_MS: 3000,
+      SUPERVISOR_POLL_INTERVAL_MS: 1200,
+      SUPERVISOR_NAVIGATION_INTERVAL_MS: 6000,
+      SUPERVISOR_AGENT_POLL_INTERVAL_MS: 1200,
+      SUPERVISOR_AGENT_NAVIGATION_INTERVAL_MS: 6000,
+    },
+    incomingDetection: {
+      INCOMING_CRITICAL_WINDOW_SEC: 25,
+      INCOMING_FAST_POLL_MS: 250,
+      INCOMING_NORMAL_POLL_MS: 1000,
+      OMNI_STRONG_REFOCUS_MS: 3000,
+      SUPERVISOR_PRE_ACCEPT_POLL_MS: 250,
+    },
+    behaviorFlags: {
+      SUPERVISOR_CHECK_BEFORE_ACCEPT: true,
+      SUPERVISOR_REQUIRE_PRE_ACCEPT_OBSERVATION: true,
+      ALLOW_DELTA_SIGNALS_IN_SUPERVISOR: true,
+      SUPERVISOR_ALLOW_IN_PROGRESS_FALLBACK: false,
+      SUPERVISOR_SKIP_QUEUE_BACKLOG: false,
+      SUPERVISOR_REQUIRE_TABLE_SOURCE: true,
+      SUPERVISOR_REQUIRE_TOTAL_WAITING_HEADER: true,
+    },
+    transcript: {
+      TRANSCRIPT_WAIT_SEC: 60,
+      TRANSCRIPT_MIN_GROWTH_CHARS: 12,
+      PREFLIGHT_PANEL_HOLD_MS: 800,
+    },
+    playwright: {
+      PW_VIDEO_MODE: "retain-on-failure",
+      PW_HEADLESS: true,
+      PW_USE_FAKE_MEDIA: true,
+    },
+  };
+}
+
 function sendFile(res, filePath, contentType) {
   const resolved = path.resolve(__dirname, filePath);
   if (!fs.existsSync(resolved)) {
@@ -126,6 +176,31 @@ function parseEnvFile(filePath) {
   return env;
 }
 
+// ── Vault Auth (gitignored, stores tokens per profile) ─────────────────────
+const VAULT_AUTH_PATH = path.resolve(PROJECT_ROOT, "instances", ".vault-auth.json");
+
+function readVaultAuth() {
+  if (!fs.existsSync(VAULT_AUTH_PATH)) return {};
+  try { return JSON.parse(fs.readFileSync(VAULT_AUTH_PATH, "utf8")); } catch { return {}; }
+}
+
+function writeVaultAuth(data) {
+  fs.mkdirSync(path.dirname(VAULT_AUTH_PATH), { recursive: true });
+  fs.writeFileSync(VAULT_AUTH_PATH, JSON.stringify(data, null, 2));
+}
+
+function getVaultToken(profileId) {
+  const auth = readVaultAuth();
+  return auth[profileId]?.token || "";
+}
+
+function setVaultToken(profileId, token) {
+  const auth = readVaultAuth();
+  if (!auth[profileId]) auth[profileId] = {};
+  auth[profileId].token = token;
+  writeVaultAuth(auth);
+}
+
 function maskSensitiveValues(envMap) {
   const masked = { ...envMap };
   for (const key of Object.keys(masked)) {
@@ -150,7 +225,8 @@ function generateEnvContent(profile, creds) {
 
   if (isVault) {
     lines.push(`VAULT_ADDR=${creds.vaultAddr || ""}`);
-    lines.push(`VAULT_TOKEN=${creds.vaultToken || ""}`);
+    // VAULT_TOKEN is stored in profiles.json vault section, NOT in .env
+    // (plaintext token in .env triggers REGULATED_MODE violation)
   }
 
   lines.push(
@@ -251,7 +327,8 @@ async function handleApi(req, res) {
         const backend = (envMap.SECRETS_BACKEND || "env").toLowerCase();
         p._authBackend = backend;
         if (backend === "vault") {
-          p._authStatus = (envMap.VAULT_ADDR && envMap.SF_PASSWORD_REF) ? "configured" : "incomplete";
+          const hasVault = (p.vault?.addr || envMap.VAULT_ADDR) && (getVaultToken(p.id) || envMap.VAULT_TOKEN);
+          p._authStatus = (hasVault && envMap.SF_PASSWORD_REF) ? "configured" : "incomplete";
         } else {
           p._authStatus = (envMap.SF_USERNAME && envMap.SF_PASSWORD) ? "configured" : "incomplete";
         }
@@ -463,6 +540,94 @@ async function handleApi(req, res) {
     return true;
   }
 
+  // POST /api/discovery/run — run org discovery for a profile
+  if (pathname === "/api/discovery/run" && req.method === "POST") {
+    const body = await parseBody(req);
+    const { profileId } = body;
+    if (!profileId) {
+      sendJson(res, 400, { error: "Missing profileId" });
+      return true;
+    }
+    try {
+      const { runOrgDiscovery } = await import(
+        path.resolve(PROJECT_ROOT, "scripts/orgDiscoveryRunner.mjs")
+      );
+      const result = await runOrgDiscovery(profileId);
+      sendJson(res, 200, result);
+    } catch (err) {
+      const msg = err?.message || String(err);
+      const status = msg.includes("expired") || msg.includes("401") ? 401 : 500;
+      sendJson(res, status, { error: msg });
+    }
+    return true;
+  }
+
+  // POST /api/discovery/save — save discovered vocabulary selections to profile
+  if (pathname === "/api/discovery/save" && req.method === "POST") {
+    const body = await parseBody(req);
+    const { profileId, vocabulary, salesforce } = body;
+    if (!profileId) {
+      sendJson(res, 400, { error: "Missing profileId" });
+      return true;
+    }
+    const profilesData = readJsonFile("instances/profiles.json");
+    if (!profilesData) {
+      sendJson(res, 404, { error: "No profiles found" });
+      return true;
+    }
+    const profile = profilesData.profiles.find((p) => p.id === profileId);
+    if (!profile) {
+      sendJson(res, 404, { error: `Profile not found: ${profileId}` });
+      return true;
+    }
+    // Merge vocabulary selections into profile
+    if (vocabulary && typeof vocabulary === "object") {
+      profile.vocabulary = { ...(profile.vocabulary || {}), ...vocabulary };
+    }
+    // Update salesforce app names if provided
+    if (salesforce && typeof salesforce === "object") {
+      profile.salesforce = { ...(profile.salesforce || {}), ...salesforce };
+    }
+    writeJsonFile("instances/profiles.json", profilesData);
+    sendJson(res, 200, { message: "Vocabulary saved", profileId });
+    return true;
+  }
+
+  // GET /api/discovery/status — check discovery cache age and session validity
+  if (pathname === "/api/discovery/status" && req.method === "GET") {
+    const params = new URLSearchParams(req.url.split("?")[1] || "");
+    const profileId = params.get("profile") || "personal";
+    const cachePath = path.resolve(
+      PROJECT_ROOT,
+      `.cache/org-vocabulary-${profileId}.json`
+    );
+    const storagePath = path.resolve(
+      PROJECT_ROOT,
+      `.auth/sf-${profileId}.json`
+    );
+    const result = {
+      profileId,
+      hasCachedDiscovery: fs.existsSync(cachePath),
+      cacheAge: null,
+      hasStoredSession: fs.existsSync(storagePath),
+    };
+    if (result.hasCachedDiscovery) {
+      try {
+        const cached = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+        const discoveredAt = cached.discoveredAt
+          ? new Date(cached.discoveredAt)
+          : null;
+        if (discoveredAt) {
+          result.cacheAge = Math.round(
+            (Date.now() - discoveredAt.getTime()) / 60000
+          );
+        }
+      } catch { /* ignore parse errors */ }
+    }
+    sendJson(res, 200, result);
+    return true;
+  }
+
   // GET /api/env-preview — dry-run: show env vars for a scenario
   if (pathname === "/api/env-preview" && req.method === "POST") {
     const body = await parseBody(req);
@@ -516,7 +681,7 @@ async function handleApi(req, res) {
   // PUT /api/suite — update suite metadata (rename, change connectionSetId)
   if (pathname === "/api/suite" && req.method === "PUT") {
     const body = await parseBody(req);
-    const { file, name, connectionSetId } = body;
+    const { file, name, connectionSetId, vocabulary, defaults } = body;
     if (!file) {
       sendJson(res, 400, { error: "Missing file parameter" });
       return true;
@@ -532,6 +697,19 @@ async function handleApi(req, res) {
         data.connectionSetId = connectionSetId;
       } else {
         delete data.connectionSetId;
+      }
+    }
+    if (vocabulary && typeof vocabulary === "object") {
+      data.vocabulary = vocabulary;
+    }
+    if (defaults && typeof defaults === "object") {
+      // Merge defaults — preserve existing timeouts if not provided
+      if (!data.defaults) data.defaults = {};
+      if (defaults.callTrigger) {
+        data.defaults.callTrigger = { ...data.defaults.callTrigger, ...defaults.callTrigger };
+      }
+      if (defaults.timeouts) {
+        data.defaults.timeouts = { ...data.defaults.timeouts, ...defaults.timeouts };
       }
     }
     writeJsonFile(file, data);
@@ -557,12 +735,52 @@ async function handleApi(req, res) {
     return true;
   }
 
+  // ── System Settings (Advanced Settings) ──────────────────────────────────
+
+  // GET /api/system-settings — return merged defaults + saved values
+  if (pathname === "/api/system-settings" && req.method === "GET") {
+    const defaults = getDefaultSystemSettings();
+    const saved = readJsonFile("instances/system-settings.json") || {};
+    // Merge: saved values override defaults per-group
+    const merged = {};
+    for (const [group, entries] of Object.entries(defaults)) {
+      merged[group] = { ...entries, ...(saved[group] || {}) };
+    }
+    sendJson(res, 200, merged);
+    return true;
+  }
+
+  // PUT /api/system-settings — save advanced settings
+  if (pathname === "/api/system-settings" && req.method === "PUT") {
+    const body = await parseBody(req);
+    if (!body || typeof body !== "object") {
+      sendJson(res, 400, { error: "Invalid settings payload" });
+      return true;
+    }
+    // Validate that only known groups are saved
+    const defaults = getDefaultSystemSettings();
+    const cleaned = {};
+    for (const [group, entries] of Object.entries(body)) {
+      if (defaults[group]) {
+        cleaned[group] = {};
+        for (const [key, value] of Object.entries(entries)) {
+          if (key in defaults[group]) {
+            cleaned[group][key] = value;
+          }
+        }
+      }
+    }
+    writeJsonFile("instances/system-settings.json", cleaned);
+    sendJson(res, 200, { message: "System settings saved" });
+    return true;
+  }
+
   // ── Profile / Connection Set management ────────────────────────────────
 
   // POST /api/profile — create a new connection set
   if (pathname === "/api/profile" && req.method === "POST") {
     const body = await parseBody(req);
-    const { label, customer, salesforce, connect } = body;
+    const { label, customer, salesforce, connect, vault } = body;
     if (!label || !label.trim()) {
       sendJson(res, 400, { error: "Connection label is required" });
       return true;
@@ -587,6 +805,9 @@ async function handleApi(req, res) {
         region: connect?.region || "us-west-2",
         instanceAlias: connect?.instanceAlias || "",
       },
+      vault: {
+        addr: vault?.addr || "",
+      },
       discovery: { autoDiscover: true, cacheFile: `.cache/org-vocabulary-${id}.json`, cacheTtlMinutes: 60 },
       vocabulary: {
         omniTargetStatus: null,
@@ -600,6 +821,8 @@ async function handleApi(req, res) {
     };
     profilesData.profiles.push(profile);
     if (!profilesData.defaultInstance) profilesData.defaultInstance = id;
+    // Store vault token in gitignored file (never in profiles.json)
+    if (vault?.token) setVaultToken(id, vault.token);
     writeJsonFile("instances/profiles.json", profilesData);
 
     // Generate skeleton .env file
@@ -615,7 +838,7 @@ async function handleApi(req, res) {
   // PUT /api/profile — update a connection set
   if (pathname === "/api/profile" && req.method === "PUT") {
     const body = await parseBody(req);
-    const { id, label, customer, salesforce, connect } = body;
+    const { id, label, customer, salesforce, connect, vault } = body;
     if (!id) {
       sendJson(res, 400, { error: "Missing profile id" });
       return true;
@@ -639,6 +862,12 @@ async function handleApi(req, res) {
     if (connect) {
       if (connect.instanceAlias !== undefined) profile.connect.instanceAlias = connect.instanceAlias;
       if (connect.region) profile.connect.region = connect.region;
+    }
+    if (vault && typeof vault === "object") {
+      if (!profile.vault) profile.vault = {};
+      if (vault.addr !== undefined) profile.vault.addr = vault.addr;
+      // Vault token stored in gitignored file, not profiles.json
+      if (vault.token !== undefined) setVaultToken(id, vault.token);
     }
     writeJsonFile("instances/profiles.json", profilesData);
     sendJson(res, 200, { message: "Profile updated" });
@@ -706,7 +935,14 @@ async function handleApi(req, res) {
       return true;
     }
     const backend = (envMap.SECRETS_BACKEND || "env").toLowerCase();
+    // Inject vault token from gitignored auth file (not stored in .env)
+    if (backend === "vault") {
+      const vt = getVaultToken(profileId);
+      if (vt) envMap.VAULT_TOKEN = vt;
+    }
     const masked = backend === "vault" ? envMap : maskSensitiveValues(envMap);
+    // Mask the vault token for display
+    if (masked.VAULT_TOKEN) masked.VAULT_TOKEN = "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022";
     // Check if credentials are configured (non-empty sensitive fields)
     let configured = false;
     if (backend === "vault") {
@@ -714,7 +950,7 @@ async function handleApi(req, res) {
     } else {
       configured = !!(envMap.SF_USERNAME && envMap.SF_PASSWORD);
     }
-    sendJson(res, 200, { backend, env: masked, configured });
+    sendJson(res, 200, { backend, env: masked, configured, hasVaultToken: !!getVaultToken(profileId) });
     return true;
   }
 
@@ -806,6 +1042,51 @@ async function handleApi(req, res) {
     return true;
   }
 
+  // ── Auth refresh ────────────────────────────────────────────────────────
+
+  // POST /api/auth/refresh — refresh Salesforce session, returns when done
+  if (pathname === "/api/auth/refresh" && req.method === "POST") {
+    const body = await parseBody(req);
+    const profileId = body.profileId || "personal";
+
+    // Load Vault config from profile settings (profiles.json vault section)
+    // This avoids putting VAULT_TOKEN in the env file which triggers regulated mode violations
+    const profilesData = readJsonFile("instances/profiles.json");
+    const profile = profilesData?.profiles?.find((p) => p.id === profileId);
+    const profileEnv = profile?.envFile ? parseEnvFile(profile.envFile) : {};
+
+    const env = { ...process.env, INSTANCE: profileId };
+    // Priority: body override > profile.vault > env file > process.env
+    env.VAULT_ADDR = body.vaultAddr || profile?.vault?.addr || profileEnv?.VAULT_ADDR || env.VAULT_ADDR || "";
+    env.VAULT_TOKEN = body.vaultToken || getVaultToken(profileId) || profileEnv?.VAULT_TOKEN || env.VAULT_TOKEN || "";
+
+    const child = spawn(
+      "node",
+      [path.join(PROJECT_ROOT, "scripts/run-instance.mjs"), "auth:state"],
+      { cwd: PROJECT_ROOT, env, stdio: ["ignore", "pipe", "pipe"] }
+    );
+
+    let output = "";
+    child.stdout.on("data", (chunk) => { output += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { output += chunk.toString(); });
+
+    await new Promise((resolve) => {
+      child.on("close", (code) => {
+        if (code === 0) {
+          sendJson(res, 200, { success: true, output });
+        } else {
+          sendJson(res, 500, {
+            success: false,
+            error: `Auth refresh failed (exit ${code})`,
+            output,
+          });
+        }
+        resolve();
+      });
+    });
+    return true;
+  }
+
   // ── Run management ──────────────────────────────────────────────────────
 
   // POST /api/run — start a suite run, returns run ID
@@ -826,6 +1107,32 @@ async function handleApi(req, res) {
       return true;
     }
 
+    // Auto-refresh expired sessions before running (same as --refresh-auth)
+    const refreshAuth = body.refreshAuth !== false; // default: true
+    if (refreshAuth && !dryRun) {
+      // Inject Vault config from profile settings
+      const runProfileId = instance || "personal";
+      const runProfilesData = readJsonFile("instances/profiles.json");
+      const runProfile = runProfilesData?.profiles?.find((p) => p.id === runProfileId);
+      const runProfileEnv = runProfile?.envFile ? parseEnvFile(runProfile.envFile) : {};
+      const refreshEnv = { ...process.env };
+      if (instance) refreshEnv.INSTANCE = instance;
+      refreshEnv.VAULT_ADDR = runProfile?.vault?.addr || runProfileEnv?.VAULT_ADDR || refreshEnv.VAULT_ADDR || "";
+      refreshEnv.VAULT_TOKEN = getVaultToken(runProfileId) || runProfileEnv?.VAULT_TOKEN || refreshEnv.VAULT_TOKEN || "";
+      const refreshCode = await new Promise((resolve) => {
+        const rc = spawn(
+          "node",
+          [path.join(PROJECT_ROOT, "scripts/run-instance.mjs"), "refresh-auth", "--", "--sf-only"],
+          { cwd: PROJECT_ROOT, env: refreshEnv, stdio: ["ignore", "pipe", "pipe"] }
+        );
+        rc.on("close", (code) => resolve(code));
+        rc.on("error", () => resolve(1));
+      });
+      if (refreshCode !== 0) {
+        console.warn(`[run] Auth refresh exited with code ${refreshCode}, proceeding anyway.`);
+      }
+    }
+
     const runId = `run-${Date.now()}`;
     const env = {
       ...process.env,
@@ -834,6 +1141,14 @@ async function handleApi(req, res) {
     };
     if (dryRun) env.E2E_SUITE_DRY_RUN = "true";
     if (instance) env.INSTANCE = instance;
+
+    // Inject Vault config from profiles.json so run-instance.mjs can resolve secrets
+    const execProfileId = instance || "personal";
+    const execProfilesData = readJsonFile("instances/profiles.json");
+    const execProfile = execProfilesData?.profiles?.find((p) => p.id === execProfileId);
+    if (execProfile?.vault?.addr) env.VAULT_ADDR = execProfile.vault.addr;
+    const execVaultToken = getVaultToken(execProfileId);
+    if (execVaultToken) env.VAULT_TOKEN = execVaultToken;
 
     const child = spawn("node", [path.join(PROJECT_ROOT, "scripts/run-instance-e2e-suite.mjs")], {
       cwd: PROJECT_ROOT,

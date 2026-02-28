@@ -12,7 +12,18 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import ffmpegPath from "ffmpeg-static";
+import ffmpegStatic from "ffmpeg-static";
+
+// Prefer system ffmpeg (has drawtext/freetype) over ffmpeg-static (stripped)
+function resolveFFmpeg() {
+  const sys = ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"];
+  for (const p of sys) {
+    if (fs.existsSync(p)) return p;
+  }
+  if (ffmpegStatic && fs.existsSync(ffmpegStatic)) return ffmpegStatic;
+  return null;
+}
+const ffmpegPath = resolveFFmpeg();
 
 // ── Video constants ────────────────────────────────────────
 const W = 1280;

@@ -145,7 +145,25 @@ function bindGlobalEvents() {
   // Suite & connection management
   document.getElementById("btn-suite-settings").addEventListener("click", openSuiteSettingsModal);
   document.getElementById("btn-suite-create").addEventListener("click", openCreateSuiteModal);
-  document.getElementById("btn-connections").addEventListener("click", openConnectionsModal);
+
+  // Setup gear dropdown
+  const setupBtn = document.getElementById("btn-setup");
+  const setupDropdown = document.getElementById("setup-dropdown");
+  setupBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setupDropdown.classList.toggle("hidden");
+  });
+  document.addEventListener("click", () => setupDropdown.classList.add("hidden"));
+  setupDropdown.addEventListener("click", (e) => e.stopPropagation());
+
+  document.getElementById("btn-advanced-settings").addEventListener("click", () => {
+    setupDropdown.classList.add("hidden");
+    openAdvancedSettingsModal();
+  });
+  document.getElementById("btn-connections").addEventListener("click", () => {
+    setupDropdown.classList.add("hidden");
+    openConnectionsModal();
+  });
 
   document.getElementById("btn-cancel-edit").addEventListener("click", () => {
     state.editingScenarioId = null;
@@ -195,7 +213,10 @@ function renderScenarioList() {
       if (steps.some((st) => st.action === "start_supervisor")) {
         badges.push('<span class="badge badge-supervisor">supervisor</span>');
       }
-      if (s.callTrigger?.ivrDigits) {
+      if (s.callTrigger?.ivrSteps?.length > 0) {
+        const dtmfLabel = s.callTrigger.ivrSteps.map((st) => st.label || st.dtmf).join(" > ");
+        badges.push(`<span class="badge badge-ivr">IVR ${dtmfLabel}</span>`);
+      } else if (s.callTrigger?.ivrDigits) {
         badges.push(`<span class="badge badge-ivr">IVR ${s.callTrigger.ivrDigits}</span>`);
       }
       if (steps.some((st) => ["hold_call", "end_call", "play_agent_audio", "complete_acw"].includes(st.action))) {
@@ -399,14 +420,12 @@ function initScenarioDragDrop(list) {
 function defaultAnswers() {
   return {
     // Call setup
-    entryNumber: "+18005550199",
+    entryNumber: "",
     callMode: "connect_ccp",
-    // IVR
+    // IVR (speech mode — no timer delays needed)
     hasIvr: false,
     ivrDigits: "",
-    ivrDelayMs: 4000,
-    ivrInterDigitDelayMs: 450,
-    ivrLevels: [{ digits: "", label: "", delaySec: 4 }],
+    ivrLevels: [{ digits: "", label: "" }],
     // Routing
     targetQueue: "",
     routeType: "direct",
@@ -514,18 +533,23 @@ function scenarioToAnswers(s) {
   const acwStep = steps.find((st) => st.action === "complete_acw");
   const hasConversation = !!(agentAudioStep || callerAudioStep || holdStep || endCallStep || acwStep);
 
-  // Parse IVR levels from steps
+  // Parse IVR levels from ivrSteps (speech mode) or legacy steps/callTrigger
   const dtmfSteps = steps.filter((st) => st.action === "send_dtmf_sequence");
-  let ivrLevels = [{ digits: "", label: "", delaySec: 4 }];
-  if (dtmfSteps.length > 0) {
+  let ivrLevels = [{ digits: "", label: "" }];
+  if (ct.ivrSteps?.length > 0) {
+    // Speech mode ivrSteps format
+    ivrLevels = ct.ivrSteps.map((st) => ({
+      digits: st.dtmf || "",
+      label: st.label || "",
+    }));
+  } else if (dtmfSteps.length > 0) {
     ivrLevels = dtmfSteps.map((st) => ({
       digits: st.digits || "",
       label: st.label || "",
-      delaySec: Math.round((st.delayBeforeMs || 4000) / 1000),
     }));
   } else if (ct.ivrDigits) {
-    // Single-level IVR from callTrigger
-    ivrLevels = [{ digits: ct.ivrDigits, label: "", delaySec: Math.round((ct.ivrInitialDelayMs || 4000) / 1000) }];
+    // Single-level IVR from legacy callTrigger
+    ivrLevels = [{ digits: ct.ivrDigits, label: "" }];
   }
 
   // Parse greeting prompts
@@ -533,12 +557,10 @@ function scenarioToAnswers(s) {
   const closedPrompt = listenSteps.find((st) => /closed/i.test(st.promptText || ""));
 
   return {
-    entryNumber: ct.entryNumber || "+18005550199",
+    entryNumber: ct.entryNumber || "",
     callMode: ct.mode || "connect_ccp",
-    hasIvr: !!(ct.ivrDigits || ct.ivrDigits === "" && supStep) || dtmfSteps.length > 0,
+    hasIvr: !!(ct.ivrSteps?.length > 0 || ct.ivrDigits || ct.ivrDigits === "" && supStep) || dtmfSteps.length > 0,
     ivrDigits: ct.ivrDigits || "",
-    ivrDelayMs: ct.ivrInitialDelayMs || 4000,
-    ivrInterDigitDelayMs: ct.ivrInterDigitDelayMs || 450,
     ivrLevels,
     targetQueue: supStep?.queue || "",
     routeType: ct.routingType || (supStep?.skill ? "skill" : supStep?.queue ? "queue" : ct.extension ? "extension" : ct.targetAgent ? "direct" : "direct"),
@@ -701,7 +723,6 @@ function collectCurrentStepAnswers() {
           .map((l) => l.digits)
           .filter(Boolean)
           .join("");
-        state.answers.ivrDelayMs = (state.answers.ivrLevels[0]?.delaySec || 4) * 1000;
       }
       break;
 
@@ -759,7 +780,6 @@ function collectIvrLevels() {
     levels.push({
       digits: row.querySelector(".ivr-level-digits")?.value.trim() || "",
       label: row.querySelector(".ivr-level-label")?.value.trim() || "",
-      delaySec: parseInt(row.querySelector(".ivr-level-delay")?.value || "4", 10),
     });
   });
   if (levels.length > 0) {
@@ -836,8 +856,8 @@ function renderCallStep() {
       <div class="form-group">
         <label class="form-label">Entry Point Number</label>
         <input class="form-input" id="entry-number" type="tel"
-               placeholder="+18005550199" value="${esc(a.entryNumber)}" />
-        <div class="form-hint">The phone number the caller dials to reach your contact center</div>
+               placeholder="Leave blank to use Suite Settings value" value="${esc(a.entryNumber)}" />
+        <div class="form-hint">Override the suite entry number for this scenario only. Leave blank to use the number from Suite Settings vocabulary.</div>
       </div>
 
       <div class="form-group">
@@ -1050,9 +1070,8 @@ function renderIvrFlowchartNode(level, index, totalLevels) {
             <label>Label <span class="optional">(optional)</span></label>
             <input class="form-input ivr-level-label" placeholder="e.g. English, Billing" value="${esc(level.label)}" />
           </div>
-          <div class="ivr-fc-field ivr-fc-field-sm">
-            <label>Wait (sec)</label>
-            <input class="form-input ivr-level-delay" type="number" min="0" max="30" value="${level.delaySec}" />
+          <div class="ivr-fc-field ivr-fc-field-sm" style="display:flex;align-items:center;justify-content:center;">
+            <span class="form-hint" style="font-size:11px;text-align:center;">Auto-detect<br/>prompt end</span>
           </div>
         </div>
       </div>
@@ -1069,7 +1088,7 @@ function renderIvrFlowchart(levels, entryNumber, targetQueue) {
       <div class="ivr-fc-icon">&#x260E;</div>
       <div class="ivr-fc-body">
         <div class="ivr-fc-title">Caller Dials</div>
-        <div class="ivr-fc-detail">${esc(entryNumber || "+18005550199")}</div>
+        <div class="ivr-fc-detail">${esc(entryNumber || "(from Suite Settings)")}</div>
       </div>
     </div>
   `;
@@ -1162,7 +1181,7 @@ function bindIvrFlowchartEvents() {
       const idx = parseInt(btn.dataset.index, 10);
       state.answers.ivrLevels.splice(idx, 1);
       if (state.answers.ivrLevels.length === 0) {
-        state.answers.ivrLevels = [{ digits: "", label: "", delaySec: 4 }];
+        state.answers.ivrLevels = [{ digits: "", label: "" }];
       }
       rerenderIvrLevels();
     });
@@ -1173,7 +1192,7 @@ function bindIvrFlowchartEvents() {
     btn.addEventListener("click", () => {
       collectIvrLevels();
       const afterIdx = parseInt(btn.dataset.insertAfter, 10);
-      state.answers.ivrLevels.splice(afterIdx + 1, 0, { digits: "", label: "", delaySec: 2 });
+      state.answers.ivrLevels.splice(afterIdx + 1, 0, { digits: "", label: "" });
       rerenderIvrLevels();
     });
   });
@@ -1907,8 +1926,7 @@ function renderReviewStep() {
           <div style="font-size: 13px; color: var(--text-secondary); padding: 8px 0;">
             <div style="margin-bottom: 6px;">Mode: <strong>${esc(scenario.callTrigger?.mode || "connect_ccp")}</strong></div>
             ${scenario.callTrigger?.entryNumber ? `<div style="margin-bottom: 6px;">Number: <strong>${esc(scenario.callTrigger.entryNumber)}</strong></div>` : ""}
-            ${scenario.callTrigger?.ivrDigits !== undefined ? `<div style="margin-bottom: 6px;">IVR Digits: <strong>${scenario.callTrigger.ivrDigits === "" ? "(none — timeout)" : `DTMF ${esc(scenario.callTrigger.ivrDigits)}`}</strong></div>` : ""}
-            ${scenario.callTrigger?.ivrInitialDelayMs ? `<div style="margin-bottom: 6px;">IVR Wait: <strong>${scenario.callTrigger.ivrInitialDelayMs / 1000}s</strong></div>` : ""}
+            ${scenario.callTrigger?.ivrSteps?.length > 0 ? `<div style="margin-bottom: 6px;">IVR Steps: <strong>${scenario.callTrigger.ivrSteps.map((st) => st.label ? `${st.label} (${st.dtmf})` : `DTMF ${st.dtmf}`).join(" → ")}</strong></div>` : scenario.callTrigger?.ivrDigits !== undefined ? `<div style="margin-bottom: 6px;">IVR Digits: <strong>${scenario.callTrigger.ivrDigits === "" ? "(none — timeout)" : `DTMF ${esc(scenario.callTrigger.ivrDigits)}`}</strong></div>` : ""}
           </div>
         </div>
 
@@ -2170,21 +2188,15 @@ function answersToScenario() {
   const callTrigger = { mode: a.callMode };
   if (a.entryNumber) callTrigger.entryNumber = a.entryNumber;
 
-  const isMultiLevelIvr = a.hasIvr && a.ivrLevels.filter((l) => l.digits).length > 1;
-
-  if (a.hasIvr && !isMultiLevelIvr) {
-    const firstLevel = a.ivrLevels[0];
-    callTrigger.ivrDigits = firstLevel?.digits || a.ivrDigits || "";
-    callTrigger.ivrInitialDelayMs = (firstLevel?.delaySec || 4) * 1000;
-    callTrigger.ivrInterDigitDelayMs = a.ivrInterDigitDelayMs || 450;
-    callTrigger.ivrPostDelayMs = 1200;
-    callTrigger.dtmfMinCallElapsedSec = 5;
-  } else if (a.hasIvr && isMultiLevelIvr) {
-    const firstLevel = a.ivrLevels[0];
-    callTrigger.ivrDigits = firstLevel?.digits || "";
-    callTrigger.ivrInitialDelayMs = (firstLevel?.delaySec || 4) * 1000;
-    callTrigger.ivrPostDelayMs = 1200;
-    callTrigger.dtmfMinCallElapsedSec = 5;
+  if (a.hasIvr) {
+    // Build ivrSteps from IVR levels — speech mode detects prompts automatically
+    const levels = (a.ivrLevels || []).filter((l) => l.digits);
+    if (levels.length > 0) {
+      callTrigger.ivrSteps = levels.map((l) => ({
+        dtmf: l.digits,
+        ...(l.label ? { label: l.label } : {}),
+      }));
+    }
   } else if (a.routeType === "queue" && !a.ivrDigits) {
     callTrigger.ivrDigits = "";
   }
@@ -2285,18 +2297,8 @@ function answersToScenario() {
       steps.push({ action: "listen_for_prompt", promptText: a.greetingText, listenTimeoutSec: 10 });
     }
 
-    // Multi-level IVR: add DTMF steps for levels 2+
-    if (isMultiLevelIvr) {
-      for (let i = 1; i < a.ivrLevels.length; i++) {
-        const lvl = a.ivrLevels[i];
-        if (lvl.digits) {
-          steps.push({ action: "wait_for_ivr_prompt", timeoutSec: 10, silenceThresholdMs: 2000 });
-          const dtmfStep = { action: "send_dtmf_sequence", digits: lvl.digits, delayBeforeMs: lvl.delaySec * 1000 };
-          if (lvl.label) dtmfStep.label = lvl.label;
-          steps.push(dtmfStep);
-        }
-      }
-    }
+    // IVR navigation is handled automatically via ivrSteps in callTrigger (speech mode)
+    // No explicit send_dtmf_sequence / wait_for_ivr_prompt steps needed
 
     steps.push({ action: "detect_incoming", timeoutSec: a.ringTimeout });
     steps.push({ action: "accept_call" });
@@ -3234,12 +3236,211 @@ async function createSuite() {
   await loadSuite(res.file);
 }
 
-function openSuiteSettingsModal() {
+// ── Advanced System Settings ──────────────────────────────────────────────────
+
+const SYSTEM_SETTINGS_REGISTRY = [
+  // Call Handling
+  { group: "callHandling", groupLabel: "Call Handling", envVar: "VOICE_RING_TIMEOUT_SEC", label: "Ring Timeout", type: "number", default: 75, unit: "sec", hint: "Max seconds waiting for call to arrive at agent", min: 10, max: 300, step: 5 },
+  { group: "callHandling", envVar: "VOICE_POST_ACCEPT_HOLD_SEC", label: "Post-Accept Hold", type: "number", default: 6, unit: "sec", hint: "Pause after agent accepts call (video evidence capture)", min: 0, max: 30, step: 1 },
+  { group: "callHandling", envVar: "PREFLIGHT_DETAIL_HOLD_SEC", label: "Preflight Hold", type: "number", default: 2, unit: "sec", hint: "Pause after preflight check before proceeding", min: 0, max: 15, step: 1 },
+  { group: "callHandling", envVar: "PROVIDER_LOGIN_TIMEOUT_SEC", label: "Provider Login Timeout", type: "number", default: 60, unit: "sec", hint: "Timeout for Connect CCP login and warmup", min: 15, max: 180, step: 5 },
+  { group: "callHandling", envVar: "PROVIDER_SYNC_WAIT_SEC", label: "Provider Sync Wait", type: "number", default: 20, unit: "sec", hint: "Wait for provider state sync before proceeding", min: 5, max: 60, step: 5 },
+  { group: "callHandling", envVar: "CONNECT_DIAL_TIMEOUT_SEC", label: "Connect Dial Timeout", type: "number", default: 20, unit: "sec", hint: "Timeout for dialing to complete on Connect CCP", min: 10, max: 60, step: 5 },
+
+  // Supervisor Monitoring
+  { group: "supervisor", groupLabel: "Supervisor Monitoring", envVar: "SUPERVISOR_QUEUE_WAIT_TIMEOUT_SEC", label: "Queue Wait Timeout", type: "number", default: 90, unit: "sec", hint: "Timeout for supervisor to observe queue waiting", min: 30, max: 300, step: 10 },
+  { group: "supervisor", envVar: "OFFER_AFTER_QUEUE_TIMEOUT_SEC", label: "Offer After Queue Timeout", type: "number", default: 90, unit: "sec", hint: "Timeout for agent offer to appear after queue seen", min: 30, max: 300, step: 10 },
+  { group: "supervisor", envVar: "OBSERVER_FINALIZE_WAIT_SEC", label: "Observer Finalize Wait", type: "number", default: 5, unit: "sec", hint: "Cleanup time after observation completes", min: 1, max: 30, step: 1 },
+  { group: "supervisor", envVar: "SUPERVISOR_POST_QUEUE_HOLD_SEC", label: "Post-Queue Hold", type: "number", default: 2, unit: "sec", hint: "Hold after supervisor completes queue observation", min: 0, max: 15, step: 1 },
+  { group: "supervisor", envVar: "SUPERVISOR_BEFORE_ACCEPT_WAIT_MS", label: "Before-Accept Wait", type: "number", default: 3000, unit: "ms", hint: "Time in supervisor loop before agent accepts call", min: 500, max: 10000, step: 500 },
+  { group: "supervisor", envVar: "SUPERVISOR_POLL_INTERVAL_MS", label: "Queue Poll Interval", type: "number", default: 1200, unit: "ms", hint: "How often to poll supervisor queue table", min: 500, max: 5000, step: 100 },
+  { group: "supervisor", envVar: "SUPERVISOR_NAVIGATION_INTERVAL_MS", label: "Navigation Retry Interval", type: "number", default: 6000, unit: "ms", hint: "Interval between supervisor surface navigation retries", min: 2000, max: 15000, step: 1000 },
+  { group: "supervisor", envVar: "SUPERVISOR_AGENT_POLL_INTERVAL_MS", label: "Agent Offer Poll Interval", type: "number", default: 1200, unit: "ms", hint: "How often to poll for agent offer in supervisor", min: 500, max: 5000, step: 100 },
+  { group: "supervisor", envVar: "SUPERVISOR_AGENT_NAVIGATION_INTERVAL_MS", label: "Agent Navigation Interval", type: "number", default: 6000, unit: "ms", hint: "Interval between agent offer surface navigation retries", min: 2000, max: 15000, step: 1000 },
+
+  // Incoming Call Detection
+  { group: "incomingDetection", groupLabel: "Incoming Call Detection", envVar: "INCOMING_CRITICAL_WINDOW_SEC", label: "Critical Window Duration", type: "number", default: 25, unit: "sec", hint: "Duration of fast-polling window around expected call arrival", min: 5, max: 60, step: 5 },
+  { group: "incomingDetection", envVar: "INCOMING_FAST_POLL_MS", label: "Fast Poll Interval", type: "number", default: 250, unit: "ms", hint: "Polling rate during critical incoming-call window", min: 100, max: 1000, step: 50 },
+  { group: "incomingDetection", envVar: "INCOMING_NORMAL_POLL_MS", label: "Normal Poll Interval", type: "number", default: 1000, unit: "ms", hint: "Polling rate outside critical window", min: 500, max: 3000, step: 100 },
+  { group: "incomingDetection", envVar: "OMNI_STRONG_REFOCUS_MS", label: "Omni Refocus Interval", type: "number", default: 3000, unit: "ms", hint: "How often to refocus Omni-Channel panel", min: 1000, max: 10000, step: 500 },
+  { group: "incomingDetection", envVar: "SUPERVISOR_PRE_ACCEPT_POLL_MS", label: "Pre-Accept Poll Interval", type: "number", default: 250, unit: "ms", hint: "Pre-accept supervisor monitoring poll rate", min: 100, max: 1000, step: 50 },
+
+  // Behavior Flags
+  { group: "behaviorFlags", groupLabel: "Behavior Flags", envVar: "SUPERVISOR_CHECK_BEFORE_ACCEPT", label: "Check Supervisor Before Accept", type: "boolean", default: true, hint: "Verify supervisor sees call before agent accepts" },
+  { group: "behaviorFlags", envVar: "SUPERVISOR_REQUIRE_PRE_ACCEPT_OBSERVATION", label: "Require Pre-Accept Observation", type: "boolean", default: true, hint: "Enforce supervisor observation before acceptance" },
+  { group: "behaviorFlags", envVar: "ALLOW_DELTA_SIGNALS_IN_SUPERVISOR", label: "Allow Delta Signals", type: "boolean", default: true, hint: "Accept incremental state changes as supervisor signals" },
+  { group: "behaviorFlags", envVar: "SUPERVISOR_ALLOW_IN_PROGRESS_FALLBACK", label: "Allow In-Progress Fallback", type: "boolean", default: false, hint: "Fall back to in-progress work if queue observation fails" },
+  { group: "behaviorFlags", envVar: "SUPERVISOR_SKIP_QUEUE_BACKLOG", label: "Skip Queue Backlog", type: "boolean", default: false, hint: "Skip queue backlog surface discovery" },
+  { group: "behaviorFlags", envVar: "SUPERVISOR_REQUIRE_TABLE_SOURCE", label: "Require Table Source", type: "boolean", default: true, hint: "Require queue data from table (vs other UI sources)" },
+  { group: "behaviorFlags", envVar: "SUPERVISOR_REQUIRE_TOTAL_WAITING_HEADER", label: "Require Total Waiting Header", type: "boolean", default: true, hint: "Require 'Total Waiting' column header in queue table" },
+
+  // Transcript & Timing
+  { group: "transcript", groupLabel: "Transcript & Timing", envVar: "TRANSCRIPT_WAIT_SEC", label: "Transcript Wait", type: "number", default: 60, unit: "sec", hint: "Timeout waiting for call transcript to appear", min: 10, max: 180, step: 10 },
+  { group: "transcript", envVar: "TRANSCRIPT_MIN_GROWTH_CHARS", label: "Min Transcript Growth", type: "number", default: 12, unit: "chars", hint: "Minimum transcript character growth to confirm activity", min: 1, max: 50, step: 1 },
+  { group: "transcript", envVar: "PREFLIGHT_PANEL_HOLD_MS", label: "Preflight Panel Hold", type: "number", default: 800, unit: "ms", hint: "Hold time for preflight UI readiness panel", min: 200, max: 3000, step: 100 },
+
+  // Playwright
+  { group: "playwright", groupLabel: "Playwright", envVar: "PW_VIDEO_MODE", label: "Video Recording Mode", type: "select", default: "retain-on-failure", options: ["off", "on", "retain-on-failure", "on-first-retry"], hint: "When to record test video" },
+  { group: "playwright", envVar: "PW_HEADLESS", label: "Headless Mode", type: "boolean", default: true, hint: "Run browser without visible window" },
+  { group: "playwright", envVar: "PW_USE_FAKE_MEDIA", label: "Use Fake Media", type: "boolean", default: true, hint: "Use fake media devices for microphone/camera" },
+];
+
+async function openAdvancedSettingsModal() {
+  // Fetch current settings from API
+  let current = {};
+  try {
+    current = await api("/system-settings");
+  } catch (e) {
+    console.warn("Failed to load system settings, using defaults");
+  }
+
+  // Discover unique groups preserving order
+  const groups = [];
+  const seen = new Set();
+  for (const s of SYSTEM_SETTINGS_REGISTRY) {
+    if (!seen.has(s.group)) {
+      seen.add(s.group);
+      groups.push({ key: s.group, label: s.groupLabel || s.group });
+    }
+  }
+
+  // Build HTML for each section
+  let sectionsHtml = "";
+  for (const g of groups) {
+    const items = SYSTEM_SETTINGS_REGISTRY.filter((s) => s.group === g.key);
+    let fieldsHtml = "";
+    for (const s of items) {
+      const val = current?.[g.key]?.[s.envVar] ?? s.default;
+      let inputHtml = "";
+      if (s.type === "boolean") {
+        inputHtml = `<select class="form-select" id="sys-${s.envVar}" style="width:140px">
+          <option value="true"${val === true || val === "true" ? " selected" : ""}>Enabled</option>
+          <option value="false"${val === false || val === "false" ? " selected" : ""}>Disabled</option>
+        </select>`;
+      } else if (s.type === "select") {
+        const opts = (s.options || []).map((o) => `<option value="${esc(o)}"${String(val) === o ? " selected" : ""}>${esc(o)}</option>`).join("");
+        inputHtml = `<select class="form-select" id="sys-${s.envVar}" style="width:180px">${opts}</select>`;
+      } else {
+        inputHtml = `<div class="settings-inline">
+          <input type="number" class="form-input" id="sys-${s.envVar}"
+                 value="${val}" min="${s.min ?? 0}" max="${s.max ?? 99999}" step="${s.step ?? 1}" />
+          <span class="settings-unit">${esc(s.unit || "")}</span>
+        </div>`;
+      }
+      fieldsHtml += `<div class="form-group">
+        <label class="form-label">${esc(s.label)}</label>
+        ${inputHtml}
+        ${s.hint ? `<span class="form-hint">${esc(s.hint)}</span>` : ""}
+      </div>`;
+    }
+    sectionsHtml += `<div class="settings-section collapsed">
+      <div class="settings-section-header" data-settings-group="${esc(g.key)}">
+        <span>${esc(g.label)} <span style="color:var(--text-muted);font-weight:400">(${items.length})</span></span>
+        <span class="settings-section-chevron">&#x25BC;</span>
+      </div>
+      <div class="settings-section-body">${fieldsHtml}</div>
+    </div>`;
+  }
+
+  const body = `
+    <p class="form-hint" style="margin-bottom:14px">Global defaults applied to all suite runs. Suite-level and scenario-level overrides take priority.</p>
+    <div class="settings-actions">
+      <button class="btn btn-ghost btn-sm" id="sys-expand-all">Expand All</button>
+      <button class="btn btn-ghost btn-sm" id="sys-reset-defaults">Reset to Defaults</button>
+    </div>
+    ${sectionsHtml}`;
+
+  const footer = `
+    <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+    <button class="btn btn-primary" id="sys-save-btn">Save Settings</button>`;
+
+  // Use a wrapper div with modal-wide class
+  openModal("Advanced Settings", body, footer);
+  // Add wide class to the modal backdrop
+  const backdrop = document.getElementById("modal-backdrop");
+  if (backdrop) backdrop.classList.add("modal-wide");
+
+  // Section toggle handlers
+  document.querySelectorAll(".settings-section-header").forEach((hdr) => {
+    hdr.addEventListener("click", () => {
+      hdr.parentElement.classList.toggle("collapsed");
+    });
+  });
+
+  // Expand all / collapse all
+  document.getElementById("sys-expand-all").addEventListener("click", () => {
+    const sections = document.querySelectorAll(".settings-section");
+    const allExpanded = Array.from(sections).every((s) => !s.classList.contains("collapsed"));
+    sections.forEach((s) => {
+      if (allExpanded) s.classList.add("collapsed");
+      else s.classList.remove("collapsed");
+    });
+    document.getElementById("sys-expand-all").textContent = allExpanded ? "Expand All" : "Collapse All";
+  });
+
+  // Reset to defaults
+  document.getElementById("sys-reset-defaults").addEventListener("click", () => {
+    for (const s of SYSTEM_SETTINGS_REGISTRY) {
+      const el = document.getElementById(`sys-${s.envVar}`);
+      if (!el) continue;
+      el.value = String(s.default);
+    }
+    toast("Fields reset to defaults", "info");
+  });
+
+  // Save handler
+  document.getElementById("sys-save-btn").addEventListener("click", async () => {
+    const payload = {};
+    for (const s of SYSTEM_SETTINGS_REGISTRY) {
+      const el = document.getElementById(`sys-${s.envVar}`);
+      if (!el) continue;
+      if (!payload[s.group]) payload[s.group] = {};
+      if (s.type === "boolean") {
+        payload[s.group][s.envVar] = el.value === "true";
+      } else if (s.type === "number") {
+        const num = parseFloat(el.value);
+        payload[s.group][s.envVar] = isNaN(num) ? s.default : num;
+      } else {
+        payload[s.group][s.envVar] = el.value;
+      }
+    }
+    const res = await api("/system-settings", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+    if (res.error) {
+      toast(res.error, "error");
+      return;
+    }
+    closeModal();
+    toast("Advanced settings saved", "success");
+  });
+}
+
+async function openSuiteSettingsModal() {
   if (!state.currentSuiteFile || !state.currentSuite) {
     toast("Select a suite first", "error");
     return;
   }
   const suite = state.currentSuite;
+  const vocab = suite.vocabulary || {};
+
+  // Load discovery cache for the suite's connection
+  const connId = suite.connectionSetId || state.profiles[0]?.id || "personal";
+  const cats = await loadDiscoveryCache(connId);
+  const hasDiscovery = !!cats;
+
+  // Filter to Console-type apps
+  const allApps = cats?.lightningApps?.items || [];
+  const consoleApps = allApps.filter(i => i.description?.toLowerCase().includes("console"));
+  const appItems = consoleApps.length > 0 ? consoleApps : allApps;
+  const queueItems = cats?.queues?.items || [];
+  const statusItems = cats?.presenceStatuses?.items || [];
+
+  const discoveryHint = hasDiscovery
+    ? `<span class="form-hint" style="color:var(--success, #2ed573);">Dropdowns populated from org discovery</span>`
+    : `<span class="form-hint" style="color:var(--text-muted);">Run Discover on the connection to populate dropdowns</span>`;
+
   const body = `
     <div class="form-group">
       <label class="form-label">Suite Name</label>
@@ -3249,6 +3450,74 @@ function openSuiteSettingsModal() {
       <label class="form-label">Connection Set</label>
       <select class="form-select" id="modal-suite-conn">${profileOptionsHtml(suite.connectionSetId || "")}</select>
       <span class="form-hint">Tests in this suite will run against the selected connection</span>
+    </div>
+    <div class="form-divider"></div>
+    <h4 style="font-size:13px;font-weight:700;margin-bottom:12px;">Org Configuration ${discoveryHint}</h4>
+    <div class="form-group">
+      <label class="form-label">Agent Console App</label>
+      <select class="form-input" id="modal-suite-agent-app">
+        <option value="">— Default —</option>
+        ${discoveryOptions(appItems, vocab.agentApp || "")}
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Supervisor Surface Name</label>
+      <input type="text" class="form-input" id="modal-suite-supervisor-surface" value="${esc(vocab.supervisorSurface || "")}" placeholder="e.g., Command Center for Service" />
+      <span class="form-hint">The tab/page name for supervisor monitoring in Salesforce</span>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Available Status</label>
+      <select class="form-input" id="modal-suite-omni-status">
+        <option value="">— Default —</option>
+        ${discoveryOptions(statusItems, vocab.omniStatus || "")}
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Default Queue</label>
+      <select class="form-input" id="modal-suite-default-queue">
+        <option value="">— None —</option>
+        ${discoveryOptions(queueItems, vocab.defaultQueue || "")}
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Support Queue</label>
+      <select class="form-input" id="modal-suite-support-queue">
+        <option value="">— None —</option>
+        ${discoveryOptions(queueItems, vocab.supportQueue || "")}
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Entry Phone Number</label>
+      <input type="text" class="form-input" id="modal-suite-entry-number" value="${esc(vocab.entryNumber || "")}" placeholder="+1 (xxx) xxx-xxxx" />
+    </div>
+    <div class="form-divider"></div>
+    <h4 style="font-size:13px;font-weight:700;margin-bottom:12px;">IVR / DTMF Settings</h4>
+    <div class="form-group">
+      <label class="form-label">IVR Detection Mode</label>
+      <select class="form-input" id="modal-suite-ivr-mode">
+        <option value="speech" ${(suite.defaults?.callTrigger?.ivrMode || "speech") === "speech" ? "selected" : ""}>Speech Detection (listens for prompt, then sends DTMF)</option>
+        <option value="timed" ${(suite.defaults?.callTrigger?.ivrMode) === "timed" ? "selected" : ""}>Timed (fixed delay before sending DTMF)</option>
+      </select>
+      <span class="form-hint">Speech mode listens for the IVR prompt to finish before sending digits — no hardcoded timers needed</span>
+    </div>
+    <div id="suite-ivr-speech-opts" class="${(suite.defaults?.callTrigger?.ivrMode || "speech") === "speech" ? "" : "hidden"}">
+      <div style="display:flex;gap:12px;">
+        <div class="form-group" style="flex:1">
+          <label class="form-label">Silence Threshold (dB)</label>
+          <input type="number" class="form-input" id="modal-suite-ivr-silence-db" value="${suite.defaults?.callTrigger?.ivrSilenceThresholdDb ?? -45}" min="-80" max="0" step="1" />
+          <span class="form-hint">Audio below this dB = silence</span>
+        </div>
+        <div class="form-group" style="flex:1">
+          <label class="form-label">Min Silence (ms)</label>
+          <input type="number" class="form-input" id="modal-suite-ivr-silence-ms" value="${suite.defaults?.callTrigger?.ivrSilenceMinMs ?? 800}" min="100" max="5000" step="100" />
+          <span class="form-hint">Silence duration to confirm prompt ended</span>
+        </div>
+        <div class="form-group" style="flex:1">
+          <label class="form-label">Max Prompt Wait (sec)</label>
+          <input type="number" class="form-input" id="modal-suite-ivr-max-wait" value="${suite.defaults?.callTrigger?.ivrMaxPromptWaitSec ?? 30}" min="5" max="120" step="5" />
+          <span class="form-hint">Timeout per IVR prompt</span>
+        </div>
+      </div>
     </div>
     <div class="form-divider"></div>
     <div class="form-group">
@@ -3273,6 +3542,11 @@ function openSuiteSettingsModal() {
   document.getElementById("modal-suite-delete-btn").addEventListener("click", deleteSuite);
   document.getElementById("modal-suite-export-btn").addEventListener("click", () => { closeModal(); exportSuite(); });
   document.getElementById("modal-suite-import-btn").addEventListener("click", () => { closeModal(); importSuite(); });
+  // Toggle speech options visibility
+  document.getElementById("modal-suite-ivr-mode").addEventListener("change", (e) => {
+    const opts = document.getElementById("suite-ivr-speech-opts");
+    if (opts) opts.classList.toggle("hidden", e.target.value !== "speech");
+  });
 }
 
 async function updateSuite() {
@@ -3282,9 +3556,30 @@ async function updateSuite() {
     toast("Suite name is required", "error");
     return;
   }
+  // Gather org config vocabulary
+  const vocabulary = {
+    agentApp: document.getElementById("modal-suite-agent-app")?.value || "",
+    supervisorSurface: document.getElementById("modal-suite-supervisor-surface")?.value?.trim() || "",
+    omniStatus: document.getElementById("modal-suite-omni-status")?.value || "",
+    defaultQueue: document.getElementById("modal-suite-default-queue")?.value || "",
+    supportQueue: document.getElementById("modal-suite-support-queue")?.value || "",
+    entryNumber: document.getElementById("modal-suite-entry-number")?.value?.trim() || "",
+  };
+  // Gather IVR / DTMF settings as suite-level defaults
+  const ivrMode = document.getElementById("modal-suite-ivr-mode")?.value || "speech";
+  const callTriggerDefaults = { mode: "connect_ccp", ivrMode };
+  if (ivrMode === "speech") {
+    const silDb = parseInt(document.getElementById("modal-suite-ivr-silence-db")?.value, 10);
+    const silMs = parseInt(document.getElementById("modal-suite-ivr-silence-ms")?.value, 10);
+    const maxWait = parseInt(document.getElementById("modal-suite-ivr-max-wait")?.value, 10);
+    if (!isNaN(silDb)) callTriggerDefaults.ivrSilenceThresholdDb = silDb;
+    if (!isNaN(silMs)) callTriggerDefaults.ivrSilenceMinMs = silMs;
+    if (!isNaN(maxWait)) callTriggerDefaults.ivrMaxPromptWaitSec = maxWait;
+  }
+  const defaults = { callTrigger: callTriggerDefaults };
   const res = await api("/suite", {
     method: "PUT",
-    body: JSON.stringify({ file: state.currentSuiteFile, name, connectionSetId }),
+    body: JSON.stringify({ file: state.currentSuiteFile, name, connectionSetId, vocabulary, defaults }),
   });
   if (res.error) {
     toast(res.error, "error");
@@ -3430,6 +3725,7 @@ function renderConnectionList() {
             ${authStatusBadge(p)}
           </div>
           <div class="conn-actions">
+            <button class="sc-btn sc-btn-discover" data-conn-discover="${esc(p.id)}" title="Discover Org Config">&#x2609;</button>
             <button class="sc-btn sc-btn-edit" data-conn-edit="${esc(p.id)}" title="Edit">&#x270E;</button>
             <button class="sc-btn sc-btn-delete" data-conn-delete="${esc(p.id)}" title="Delete">&#x2715;</button>
           </div>
@@ -3462,6 +3758,12 @@ function renderConnectionList() {
   });
   document.querySelectorAll("[data-conn-delete]").forEach((btn) => {
     btn.addEventListener("click", () => deleteConnection(btn.dataset.connDelete));
+  });
+  document.querySelectorAll("[data-conn-discover]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const p = state.profiles.find((pr) => pr.id === btn.dataset.connDiscover);
+      if (p) openDiscoverModal(p);
+    });
   });
 }
 
@@ -3782,12 +4084,20 @@ async function saveConnection(existingId) {
     return;
   }
 
-  // Save profile metadata
+  // Vault config goes to profiles.json (not .env) to avoid regulated mode violations
+  const backend = document.querySelector('input[name="secrets-backend"]:checked')?.value || "env";
+  const vaultPayload = backend === "vault" ? {
+    addr: document.getElementById("modal-vault-addr")?.value?.trim() || "",
+    token: document.getElementById("modal-vault-token")?.value?.trim() || "",
+  } : undefined;
+
+  // Save profile metadata (including vault config)
   const payload = {
     label,
     customer,
     salesforce: { loginUrl, appName },
     connect: { instanceAlias, region },
+    vault: vaultPayload,
   };
 
   let profileRes;
@@ -3803,16 +4113,15 @@ async function saveConnection(existingId) {
     return;
   }
 
-  // Save credentials to .env file
+  // Save credentials to .env file (vault addr/token already saved to profiles.json above)
   const profileId = existingId || profileRes.id;
-  const backend = document.querySelector('input[name="secrets-backend"]:checked')?.value || "env";
   const val = (id) => document.getElementById(id)?.value?.trim() || "";
 
   const credentials = { secretsBackend: backend };
 
   if (backend === "vault") {
+    // Vault addr goes to .env for VAULT_ADDR (non-sensitive); token is in profiles.json only
     credentials.vaultAddr = val("modal-vault-addr");
-    credentials.vaultToken = val("modal-vault-token");
     credentials.sfUsernameRef = val("modal-vault-sf-user");
     credentials.sfPasswordRef = val("modal-vault-sf-pass");
     credentials.awsUsernameRef = val("modal-vault-aws-user");
@@ -3869,4 +4178,283 @@ async function deleteConnection(id) {
   toast(`Connection "${name}" deleted`, "success");
   await loadProfiles();
   renderConnectionList();
+}
+
+// ── Org Discovery Modal ──────────────────────────────────────────────────
+
+const DISCOVERY_ROLE_MAP = {
+  agentApp: { label: "Agent Console App", hint: "App your agents use (e.g., Service Console)" },
+  supervisorApp: { label: "Supervisor App", hint: "App for supervisors (e.g., Command Center for Service)" },
+  omniStatus: { label: "Available Status", hint: "Presence status that makes agents available for calls" },
+  defaultQueue: { label: "Default Queue", hint: "Queue used when no IVR branch is taken" },
+  supportQueue: { label: "Support Queue", hint: "Queue for the support IVR branch (optional)" },
+};
+
+async function openDiscoverModal(profile) {
+  showDiscoverLoading(profile);
+
+  let result;
+  try {
+    result = await api("/discovery/run", {
+      method: "POST",
+      body: JSON.stringify({ profileId: profile.id }),
+    });
+  } catch (err) {
+    showDiscoverError(profile, String(err?.message || err));
+    return;
+  }
+
+  if (result?.error) {
+    showDiscoverError(profile, result.error);
+    return;
+  }
+
+  // Check if any category has a 401 / session error
+  const cats = result.categories || {};
+  const hasSessionError = Object.values(cats).some(
+    (c) => c.error && (c.error.includes("401") || c.error.includes("expired") || c.error.includes("INVALID_SESSION"))
+  );
+
+  if (hasSessionError) {
+    showSessionExpired(profile);
+    return;
+  }
+
+  renderDiscoverySummary(profile, result);
+}
+
+function showDiscoverLoading(profile) {
+  const loadingBody = `
+    <p style="margin-bottom:16px;">Discovering configuration for <strong>${esc(profile.label)}</strong>...</p>
+    <div id="discover-checklist" class="discover-checklist">
+      <div class="discover-item"><span class="discover-spinner"></span> Lightning Apps</div>
+      <div class="discover-item"><span class="discover-spinner"></span> Presence Statuses</div>
+      <div class="discover-item"><span class="discover-spinner"></span> Queues</div>
+      <div class="discover-item"><span class="discover-spinner"></span> Skills</div>
+      <div class="discover-item"><span class="discover-spinner"></span> Routing Configurations</div>
+      <div class="discover-item"><span class="discover-spinner"></span> Service Channels</div>
+    </div>
+  `;
+  openModal("Discover Org Configuration", loadingBody, "");
+}
+
+function showDiscoverError(profile, message) {
+  const isSessionError = message.includes("401") || message.includes("expired") || message.includes("INVALID_SESSION");
+  if (isSessionError) {
+    showSessionExpired(profile);
+    return;
+  }
+  const body = `
+    <p class="text-danger" style="margin-bottom:12px;">Discovery failed</p>
+    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;">${esc(message)}</p>
+    <button class="btn btn-outline" id="disc-retry-btn">Retry</button>
+  `;
+  openModal("Discover Org Configuration", body, "");
+  document.getElementById("disc-retry-btn").addEventListener("click", () => openDiscoverModal(profile));
+}
+
+function showSessionExpired(profile) {
+  const body = `
+    <div style="text-align:center;padding:20px 0;">
+      <div style="font-size:32px;margin-bottom:12px;">&#x1F512;</div>
+      <p style="font-size:15px;font-weight:600;margin-bottom:8px;">Salesforce Session Expired</p>
+      <p style="font-size:13px;color:var(--text-secondary);margin-bottom:20px;">
+        The stored session is no longer valid.<br/>
+        Click below to automatically log in and capture a fresh session.
+      </p>
+      <button class="btn btn-primary btn-lg" id="disc-refresh-btn">Refresh Session</button>
+      <div id="disc-refresh-status" style="margin-top:16px;display:none;"></div>
+      <p id="disc-vault-hint" style="font-size:11px;color:var(--text-muted);margin-top:16px;display:none;"></p>
+    </div>
+  `;
+  openModal("Discover Org Configuration", body, "");
+  document.getElementById("disc-refresh-btn").addEventListener("click", () => doSessionRefresh(profile));
+
+  // Check if Vault is configured for this profile and show helpful hints
+  const hint = document.getElementById("disc-vault-hint");
+  if (hint) {
+    const vaultAddr = profile.vault?.addr;
+    const vaultToken = profile.vault?.token;
+    if (vaultAddr && vaultToken) {
+      hint.style.display = "block";
+      hint.textContent = `Using Vault at ${vaultAddr}`;
+    } else if (vaultAddr || vaultToken) {
+      const missing = [!vaultAddr && "Vault Address", !vaultToken && "Vault Token"].filter(Boolean).join(", ");
+      hint.style.display = "block";
+      hint.innerHTML = `Vault config incomplete &mdash; <strong>${esc(missing)}</strong> missing.<br/>Edit the connection settings to add it.`;
+      hint.style.color = "var(--danger, #ff6b6b)";
+    }
+  }
+}
+
+async function doSessionRefresh(profile) {
+  const btn = document.getElementById("disc-refresh-btn");
+  const status = document.getElementById("disc-refresh-status");
+  btn.disabled = true;
+  btn.textContent = "Refreshing...";
+  status.style.display = "block";
+  status.innerHTML = `
+    <div class="discover-item"><span class="discover-spinner"></span> Launching browser to capture session...</div>
+    <p style="font-size:11px;color:var(--text-muted);margin-top:8px;">This may take 30-60 seconds</p>
+  `;
+
+  let result;
+  try {
+    result = await api("/auth/refresh", {
+      method: "POST",
+      body: JSON.stringify({ profileId: profile.id }),
+    });
+  } catch (err) {
+    status.innerHTML = `<p class="text-danger">Refresh failed: ${esc(String(err?.message || err))}</p>`;
+    btn.disabled = false;
+    btn.textContent = "Retry Refresh";
+    return;
+  }
+
+  if (result?.success) {
+    status.innerHTML = `
+      <p style="color:var(--success, #2ed573);font-weight:600;">Session refreshed successfully</p>
+      <p style="font-size:12px;color:var(--text-muted);margin-top:4px;">Re-running discovery...</p>
+    `;
+    // Auto-retry discovery after short delay
+    setTimeout(() => openDiscoverModal(profile), 1000);
+  } else {
+    status.innerHTML = `
+      <p class="text-danger">Refresh failed: ${esc(result?.error || "Unknown error")}</p>
+      ${result?.output ? `<pre style="font-size:11px;color:var(--text-muted);margin-top:8px;max-height:120px;overflow:auto;white-space:pre-wrap;">${esc(result.output.slice(-500))}</pre>` : ""}
+    `;
+    btn.disabled = false;
+    btn.textContent = "Retry Refresh";
+  }
+}
+
+function renderDiscoverySummary(profile, result) {
+  const cats = result.categories || {};
+
+  // Build read-only summary of what was found
+  let html = `<p style="margin-bottom:12px;font-size:12px;color:var(--text-muted);">
+    Discovered from <strong>${esc(result.instanceUrl || "")}</strong> &mdash; Org ${esc(result.orgId || "")}
+  </p>
+  <p style="margin-bottom:16px;font-size:13px;color:var(--text-secondary);">
+    Discovery complete. These values are now available as options in <strong>Suite Settings</strong>.
+  </p>`;
+
+  // Show summary counts for each category
+  const summaryCategories = [
+    { key: "lightningApps", icon: "&#x2726;" },
+    { key: "presenceStatuses", icon: "&#x25CF;" },
+    { key: "queues", icon: "&#x2630;" },
+    { key: "skills", icon: "&#x2605;" },
+    { key: "serviceChannels", icon: "&#x2194;" },
+    { key: "routingConfigs", icon: "&#x2699;" },
+    { key: "businessHours", icon: "&#x23F0;" },
+    { key: "connect", icon: "&#x260E;" },
+  ];
+
+  for (const { key, icon } of summaryCategories) {
+    const cat = cats[key];
+    if (!cat) continue;
+    const status = cat.error
+      ? `<span class="text-danger">${esc(cat.error.slice(0, 60))}</span>`
+      : `${cat.items.length} found`;
+    html += `
+      <details class="discover-section">
+        <summary class="discover-section-title">${icon} ${esc(cat.label)} &mdash; ${status}</summary>
+        ${cat.items.length > 0 ? `<div class="discover-info-list">
+          ${cat.items.map(i => `<div class="discover-info-item"><span>${esc(i.value)}</span><span class="text-muted">${esc(i.description || "")}</span></div>`).join("")}
+        </div>` : ""}
+      </details>
+    `;
+  }
+
+  const footer = `<button class="btn btn-primary" onclick="closeModal()">Done</button>`;
+  openModal("Org Discovery Results", html, footer);
+}
+
+function buildRadioGroup(name, title, items, defaultValue, error) {
+  if (error) {
+    return `
+      <div class="discover-section">
+        <div class="discover-section-title">${esc(title)}</div>
+        <div class="text-danger" style="font-size:12px;">${esc(error)}</div>
+      </div>
+    `;
+  }
+  if (items.length === 0) {
+    return `
+      <div class="discover-section">
+        <div class="discover-section-title">${esc(title)}</div>
+        <div class="text-muted" style="font-size:12px;">No items found</div>
+      </div>
+    `;
+  }
+  const radios = items.map((item, idx) => {
+    const checked = item.value === defaultValue ? " checked" : "";
+    return `
+      <label class="discover-radio">
+        <input type="radio" name="disc-${name}" value="${esc(item.value)}"${checked} />
+        <span class="discover-radio-label">${esc(item.value)}</span>
+        <span class="discover-radio-desc">${esc(item.desc || "")}</span>
+      </label>
+    `;
+  }).join("");
+
+  return `
+    <div class="discover-section">
+      <div class="discover-section-title">${esc(title)}</div>
+      <div class="discover-radio-group">${radios}</div>
+    </div>
+  `;
+}
+
+function buildDropdown(name, title, items, defaultValue, error) {
+  if (error) {
+    return `
+      <div class="discover-section">
+        <div class="discover-section-title">${esc(title)}</div>
+        <div class="text-danger" style="font-size:12px;">${esc(error)}</div>
+      </div>
+    `;
+  }
+  const options = items.map(i => {
+    const sel = i.value === defaultValue ? " selected" : "";
+    return `<option value="${esc(i.value)}"${sel}>${esc(i.value)}</option>`;
+  }).join("");
+
+  return `
+    <div class="discover-section">
+      <div class="discover-section-title">${esc(title)}</div>
+      <select class="form-input" id="disc-${name}">
+        <option value="">— None —</option>
+        ${options}
+      </select>
+    </div>
+  `;
+}
+
+function smartDefault(items, candidates) {
+  if (!items || items.length === 0) return "";
+  for (const candidate of candidates) {
+    const found = items.find(i =>
+      i.value.toLowerCase() === candidate.toLowerCase() ||
+      i.value.toLowerCase().includes(candidate.toLowerCase())
+    );
+    if (found) return found.value;
+  }
+  return "";
+}
+
+/** Load cached discovery data for a profile, returns categories or null. */
+async function loadDiscoveryCache(profileId) {
+  const res = await api(`/vocabulary?profile=${encodeURIComponent(profileId)}`);
+  return res?.vocabulary?.categories || null;
+}
+
+/** Build <option> tags from discovery items. */
+function discoveryOptions(items, selectedValue) {
+  if (!items || items.length === 0) return "";
+  return items.map(i => {
+    const sel = i.value === selectedValue ? " selected" : "";
+    return `<option value="${esc(i.value)}"${sel}>${esc(i.value)}</option>`;
+  }).join("");
 }

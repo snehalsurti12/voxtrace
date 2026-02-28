@@ -78,6 +78,26 @@ export function scenarioToEnv(scenario, defaults = {}) {
     env.CONNECT_CCP_DTMF_MIN_CALL_ELAPSED_SEC = String(callTrigger.dtmfMinCallElapsedSec);
   }
 
+  // ── IVR mode (speech detection vs timed) ───────────────────────────
+  if (callTrigger.ivrMode) {
+    env.CONNECT_CCP_IVR_MODE = callTrigger.ivrMode;
+  }
+  if (callTrigger.ivrSteps?.length > 0) {
+    env.CONNECT_CCP_IVR_STEPS = JSON.stringify(callTrigger.ivrSteps);
+  }
+  if (callTrigger.ivrSilenceThresholdDb != null) {
+    env.IVR_SILENCE_THRESHOLD_DB = String(callTrigger.ivrSilenceThresholdDb);
+  }
+  if (callTrigger.ivrSilenceMinMs != null) {
+    env.IVR_SILENCE_MIN_MS = String(callTrigger.ivrSilenceMinMs);
+  }
+  if (callTrigger.ivrSpeechMinMs != null) {
+    env.IVR_SPEECH_MIN_MS = String(callTrigger.ivrSpeechMinMs);
+  }
+  if (callTrigger.ivrMaxPromptWaitSec != null) {
+    env.IVR_MAX_PROMPT_WAIT_SEC = String(callTrigger.ivrMaxPromptWaitSec);
+  }
+
   // ── Timeouts ─────────────────────────────────────────────────────────
   if (timeouts.ringSec != null) {
     env.VOICE_RING_TIMEOUT_SEC = String(timeouts.ringSec);

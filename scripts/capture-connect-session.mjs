@@ -3,14 +3,15 @@ import path from "node:path";
 import { chromium } from "playwright";
 
 async function main() {
+  const isHeadless = /^(true|1|yes|on)$/i.test((process.env.PW_HEADLESS ?? "false").trim());
   let ccpUrl = (process.env.CONNECT_CCP_URL || "").trim();
   const configuredStartUrl = (process.env.CONNECT_START_URL || ccpUrl || "https://console.aws.amazon.com/connect/home").trim();
-  const autoNavigateFromConsole = process.env.CONNECT_AUTO_NAVIGATE_FROM_CONSOLE === "true";
+  const autoNavigateFromConsole = process.env.CONNECT_AUTO_NAVIGATE_FROM_CONSOLE === "true" || isHeadless;
   const autoAwsLogin = process.env.CONNECT_AUTO_AWS_LOGIN !== "false";
   const consoleRegion = (process.env.CONNECT_CONSOLE_REGION || process.env.AWS_REGION || "").trim();
   const allowEmergencyLaunch = /^(true|1|yes|on)$/i.test(
     (process.env.CONNECT_ALLOW_EMERGENCY_LAUNCH ?? "false").trim()
-  );
+  ) || isHeadless;
   const startUrl = resolvePreferredStartUrl(configuredStartUrl, consoleRegion);
   const awsAccountId = process.env.AWS_ACCOUNT_ID?.trim() || "";
   const awsUsername = process.env.AWS_USERNAME?.trim() || "";
@@ -19,7 +20,12 @@ async function main() {
   const storagePath = process.env.CONNECT_STORAGE_STATE || ".auth/connect-ccp.json";
   const timeoutMs = Number(process.env.CONNECT_LOGIN_TIMEOUT_SEC || "420") * 1000;
 
-  const browser = await chromium.launch({ headless: false });
+  const browser = await chromium.launch({
+    headless: isHeadless,
+    args: isHeadless
+      ? ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream", "--no-sandbox"]
+      : []
+  });
   const context = await browser.newContext({
     storageState: fs.existsSync(storagePath) ? storagePath : undefined,
     permissions: ["microphone"]
@@ -53,6 +59,7 @@ async function main() {
   let lastConsoleLaunchAttemptAt = 0;
   let lastAutoSigninAttemptAt = 0;
   let hintedForMfa = false;
+  let connectLoginPageHits = 0;
   let lastDialogDismissLogAt = 0;
   let lastFeedbackRecoveryLogAt = 0;
   let lastRegionRedirectAt = 0;
@@ -232,6 +239,20 @@ async function main() {
       !state.isSessionExpired &&
       Date.now() - lastCcpAttemptAt > 10_000
     ) {
+      connectLoginPageHits++;
+      // If we keep landing on the Connect login page, federation isn't working.
+      // Go back to the AWS console and try emergency access route.
+      if (connectLoginPageHits >= 3 && allowEmergencyLaunch && autoNavigateFromConsole) {
+        console.log("Connect login page loop detected. Returning to console for emergency access...");
+        const consoleUrl = consoleRegion
+          ? `https://${consoleRegion}.console.aws.amazon.com/connect/v2/app/instances?region=${consoleRegion}`
+          : startUrl;
+        await activePage.goto(consoleUrl, { waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => undefined);
+        connectLoginPageHits = 0;
+        lastCcpAttemptAt = Date.now();
+        await sleep(2000);
+        continue;
+      }
       if (ccpUrl) {
         try {
           await activePage.goto(ccpUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
@@ -674,8 +695,8 @@ async function tryClickConsoleCcpLink(page) {
 }
 
 async function tryLaunchConnectFromConsole(page, input) {
-  const path = safePath(page.url()).toLowerCase();
-  const onInstancesList = path.includes("/connect/v2/app/instances");
+  const pagePath = safePath(page.url()).toLowerCase();
+  const onInstancesList = pagePath.includes("/connect/v2/app/instances");
   const isConsolePage = safeHost(page.url()).endsWith(".console.aws.amazon.com");
   if (isConsolePage && !onInstancesList && input.consoleRegion) {
     const target = `https://${input.consoleRegion}.console.aws.amazon.com/connect/v2/app/instances?region=${input.consoleRegion}`;
@@ -685,10 +706,45 @@ async function tryLaunchConnectFromConsole(page, input) {
 
   const refreshedPath = safePath(page.url()).toLowerCase();
   const nowOnInstancesList = refreshedPath.includes("/connect/v2/app/instances");
-  const instanceFirstColumnLink = page
-    .locator("table tbody tr:first-child td:first-child a, table tbody tr:first-child a:first-of-type")
-    .first();
+
+  // First, check if the page already has an emergency login button (on overview page)
+  if (input.allowEmergencyLaunch) {
+    const emergency = page
+      .getByRole("link", { name: /emergency login|emergency access|log in for emergency access/i })
+      .or(page.getByRole("button", { name: /emergency login|emergency access|log in for emergency access/i }))
+      .first();
+    if ((await emergency.count().catch(() => 0)) > 0 && (await emergency.isVisible().catch(() => false))) {
+      await emergency.click({ force: true }).catch(() => undefined);
+      await page.waitForTimeout(700);
+      return { launched: true, method: "emergency-login" };
+    }
+  }
+
   if (nowOnInstancesList) {
+    // Debug: log all links on the instances page and take a screenshot
+    const tableLinks = await page.evaluate(() => {
+      const links = [];
+      document.querySelectorAll("table tbody tr a[href]").forEach((a) => {
+        links.push({ text: a.textContent.trim().slice(0, 80), href: a.getAttribute("href") });
+      });
+      return links;
+    }).catch(() => []);
+    if (tableLinks.length > 0) {
+      console.log(`[connect-auth] Instance table links: ${JSON.stringify(tableLinks)}`);
+    }
+    // When emergency launch is enabled, try to navigate to instance overview page first
+    // (the overview page has the "Emergency access" button that does proper federation)
+    if (input.allowEmergencyLaunch) {
+      const overviewLaunched = await tryNavigateToInstanceOverview(page, input);
+      if (overviewLaunched) {
+        return overviewLaunched;
+      }
+    }
+
+    // Fallback: click the first-column instance link directly
+    const instanceFirstColumnLink = page
+      .locator("table tbody tr:first-child td:first-child a, table tbody tr:first-child a:first-of-type")
+      .first();
     if (
       (await instanceFirstColumnLink.count().catch(() => 0)) > 0 &&
       (await instanceFirstColumnLink.isVisible().catch(() => false))
@@ -700,21 +756,86 @@ async function tryLaunchConnectFromConsole(page, input) {
     return { launched: false, method: "instances-list-no-first-column-link" };
   }
 
-  if (!input.allowEmergencyLaunch) {
-    return { launched: false, method: "emergency-disabled" };
-  }
-
-  const emergency = page
-    .getByRole("link", { name: /emergency login|emergency access/i })
-    .or(page.getByRole("button", { name: /emergency login|emergency access/i }))
-    .first();
-  if ((await emergency.count().catch(() => 0)) > 0 && (await emergency.isVisible().catch(() => false))) {
-    await emergency.click({ force: true }).catch(() => undefined);
-    await page.waitForTimeout(500);
-    return { launched: true, method: "emergency-login" };
-  }
-
   return { launched: false, method: "no-launch-control" };
+}
+
+async function tryNavigateToInstanceOverview(page, input) {
+  // On the instances list page, find the overview link (relative console URL, not direct Connect URL).
+  // The overview page has the "Log in for emergency access" button.
+
+  // Strategy 1: Look for the overview link — the actual href uses /connect/v2/app/settings/overview
+  const overviewLink = page
+    .locator("table tbody tr:first-child a[href*='/connect/v2/app/settings/overview'], table tbody tr:first-child a[href*='/connect/v2/app/instances/']")
+    .first();
+  if ((await overviewLink.count().catch(() => 0)) > 0 && (await overviewLink.isVisible().catch(() => false))) {
+    const href = await overviewLink.getAttribute("href").catch(() => "");
+    // Only click if it's a console-relative URL (not a .my.connect.aws URL)
+    if (href && !href.includes(".my.connect.aws")) {
+      console.log(`[connect-auth] Navigating to instance overview: ${href}`);
+      await overviewLink.click({ force: true }).catch(() => undefined);
+      await page.waitForTimeout(3000);
+      console.log(`[connect-auth] Overview page URL: ${page.url()}`);
+
+      // Now on overview page — find emergency access button/link
+      const emergency = page
+        .getByRole("link", { name: /emergency/i })
+        .or(page.getByRole("button", { name: /emergency/i }))
+        .or(page.locator("a:has-text('emergency'), button:has-text('emergency')"))
+        .first();
+      if ((await emergency.count().catch(() => 0)) > 0 && (await emergency.isVisible().catch(() => false))) {
+        console.log("[connect-auth] Clicking emergency access button...");
+        await emergency.click({ force: true }).catch(() => undefined);
+        await page.waitForTimeout(2000);
+        return { launched: true, method: "overview-emergency-login" };
+      }
+
+      // Try broader matching — the button may say "Log in for emergency access" or just have emergency in it
+      const emergencyBroad = page.locator("[data-testid*='emergency' i], a[href*='emergency'], a[href*='login']").first();
+      if ((await emergencyBroad.count().catch(() => 0)) > 0 && (await emergencyBroad.isVisible().catch(() => false))) {
+        console.log("[connect-auth] Clicking emergency access (broad match)...");
+        await emergencyBroad.click({ force: true }).catch(() => undefined);
+        await page.waitForTimeout(2000);
+        return { launched: true, method: "overview-emergency-broad" };
+      }
+
+      console.log("[connect-auth] Emergency access button not found on overview page.");
+    }
+  }
+
+  // Strategy 2: Extract instance ARN/ID from page and construct overview URL directly
+  const instanceArn = await page.evaluate(() => {
+    const links = document.querySelectorAll("table tbody tr:first-child a[href]");
+    for (const link of links) {
+      const href = link.getAttribute("href") || "";
+      const match = href.match(/id=(arn[^&]+)/);
+      if (match) return decodeURIComponent(match[1]);
+      const idMatch = href.match(/instance[s/]+([a-f0-9-]{36})/);
+      if (idMatch) return idMatch[1];
+    }
+    return null;
+  }).catch(() => null);
+
+  if (instanceArn && input.consoleRegion) {
+    // Try navigating directly to the overview page with the instance ARN
+    const overviewUrl = `https://${input.consoleRegion}.console.aws.amazon.com/connect/v2/app/settings/overview?region=${input.consoleRegion}&id=${encodeURIComponent(instanceArn)}`;
+    console.log(`[connect-auth] Direct navigation to overview: ${overviewUrl}`);
+    await page.goto(overviewUrl, { waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => undefined);
+    await page.waitForTimeout(3000);
+
+    const emergency = page
+      .getByRole("link", { name: /emergency/i })
+      .or(page.getByRole("button", { name: /emergency/i }))
+      .or(page.locator("a:has-text('emergency'), button:has-text('emergency')"))
+      .first();
+    if ((await emergency.count().catch(() => 0)) > 0 && (await emergency.isVisible().catch(() => false))) {
+      console.log("[connect-auth] Clicking emergency access button (strategy 2)...");
+      await emergency.click({ force: true }).catch(() => undefined);
+      await page.waitForTimeout(2000);
+      return { launched: true, method: "direct-overview-emergency-login" };
+    }
+  }
+
+  return null;
 }
 
 async function dismissInterruptingDialog(page) {

@@ -12,6 +12,12 @@ playwright-report/
 # Keep *.example files for reference
 instances/*.env
 
+# Vault tokens (per-profile, never commit)
+instances/.vault-auth.json
+
+# Discovery cache (auto-generated, per-profile)
+.cache/
+
 # Active instance profile selector
 .instance-profile
 
