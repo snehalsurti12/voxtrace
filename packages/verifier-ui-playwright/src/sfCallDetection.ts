@@ -12,6 +12,7 @@ import type { Locator, Page } from "@playwright/test";
 export type IncomingSignalType =
   | "accept_clicked"
   | "incoming_indicator"
+  | "connected_indicator"
   | "voice_tab_delta"
   | "voice_number_delta"
   | "inbox_delta"
@@ -20,7 +21,9 @@ export type IncomingSignalType =
 // ── VoiceCall tab helpers ────────────────────────────────────────────────────
 
 export function voiceCallTabs(page: Page): Locator {
-  return page.locator('[role="tab"]').filter({ hasText: /VC-\d+|Voice\s*Call|VoiceCall/i });
+  return page.locator('[role="tab"]').filter({
+    hasText: /VC-\d+|Voice\s*Call|VoiceCall|New\s+Voice|Call\s+\d|Inbound\s+Call|\+\d{1,3}\s*\(\d/i,
+  });
 }
 
 export async function countVoiceCallTabs(page: Page): Promise<number> {
@@ -81,7 +84,14 @@ export async function hasConnectedCallUiIndicator(page: Page): Promise<boolean> 
     page.getByRole("button", { name: /close contact/i }).first(),
     page.getByText(/after call work/i).first(),
     page.locator("button[title*='End call' i], button[aria-label*='End call' i]").first(),
-    page.locator("button[title*='Hang up' i], button[aria-label*='Hang up' i]").first()
+    page.locator("button[title*='Hang up' i], button[aria-label*='Hang up' i]").first(),
+    // SCV active-call controls within Omni-Channel Phone tab
+    page.getByRole("button", { name: /^hold$/i }).first(),
+    page.getByRole("button", { name: /^mute$/i }).first(),
+    page.getByRole("button", { name: /^transfer$/i }).first(),
+    page.locator("button[title*='Hold' i][title*='call' i], button[aria-label*='Hold' i]").first(),
+    // Connected call timer / duration indicator
+    page.locator("[class*='callTimer' i], [class*='call-timer' i], [class*='callDuration' i]").first(),
   ];
   for (const indicator of indicators) {
     if ((await indicator.count()) > 0 && (await indicator.isVisible().catch(() => false))) {

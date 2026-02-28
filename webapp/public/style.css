@@ -1646,6 +1646,109 @@ body {
   box-shadow: var(--shadow-lg);
   animation: fadeSlideIn 0.2s ease;
 }
+.modal-wide .modal {
+  width: 680px;
+}
+
+/* ── Collapsible Settings Sections ─────────────────────────────────────── */
+
+.settings-section {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+.settings-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  cursor: pointer;
+  background: var(--bg-primary);
+  user-select: none;
+  font-weight: 600;
+  font-size: 13px;
+}
+.settings-section-header:hover {
+  background: var(--bg-hover);
+}
+.settings-section-chevron {
+  font-size: 11px;
+  transition: transform 0.15s ease;
+  color: var(--text-muted);
+}
+.settings-section.collapsed .settings-section-chevron {
+  transform: rotate(-90deg);
+}
+.settings-section-body {
+  padding: 12px 14px 6px;
+  border-top: 1px solid var(--border);
+}
+.settings-section.collapsed .settings-section-body {
+  display: none;
+}
+.settings-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.settings-inline .form-input {
+  width: 110px;
+}
+.settings-unit {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.settings-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+/* ── Setup Gear Dropdown ───────────────────────────────────────────────── */
+
+.setup-menu {
+  position: relative;
+}
+.setup-trigger {
+  font-size: 13px;
+  gap: 4px;
+}
+.setup-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 200px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  z-index: 800;
+  padding: 4px 0;
+  animation: fadeSlideIn 0.12s ease;
+}
+.setup-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 14px;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+}
+.setup-item:hover {
+  background: var(--bg-hover);
+}
+.setup-item-icon {
+  font-size: 15px;
+  width: 20px;
+  text-align: center;
+}
 
 .modal-header {
   display: flex;
@@ -1942,4 +2045,114 @@ body {
   .ivr-fc-node {
     max-width: 100%;
   }
+}
+
+/* ── Discovery Modal ───────────────────────────────────────────────────── */
+
+.sc-btn-discover:hover { color: var(--info, #74b9ff); }
+
+.discover-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.discover-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.discover-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border-light);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: discoverSpin 0.8s linear infinite;
+}
+@keyframes discoverSpin {
+  to { transform: rotate(360deg); }
+}
+
+.discover-section {
+  margin-bottom: 16px;
+}
+.discover-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+.discover-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.discover-radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.discover-radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--transition);
+}
+.discover-radio:hover {
+  background: var(--bg-hover);
+}
+.discover-radio input[type="radio"] {
+  margin: 0;
+  accent-color: var(--accent);
+}
+.discover-radio-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.discover-radio-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+.discover-info-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+}
+.discover-info-item {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+}
+.discover-info-item:hover {
+  background: var(--bg-hover);
+}
+
+details.discover-section > summary {
+  cursor: pointer;
+  user-select: none;
+}
+details.discover-section > summary:hover {
+  color: var(--accent-light);
 }

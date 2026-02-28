@@ -46,9 +46,11 @@
     "merge:videos": "node scripts/merge-e2e-videos.mjs",
     "highlight:reel": "node scripts/merge-e2e-highlight.mjs",
     "audio:sample": "node scripts/generate-fake-audio.mjs",
+    "ivr:transcribe": "node scripts/ivr-transcriber.mjs",
     "auth:state": "node scripts/sf-login-probe.mjs",
     "auth:provider-state": "node scripts/capture-provider-session.mjs",
     "auth:connect-state": "node scripts/capture-connect-session.mjs",
+    "refresh-auth": "node scripts/refresh-auth.mjs",
     "test:ui": "playwright test",
     "test:ui:state": "SF_SKIP_LOGIN=true playwright test",
     "typecheck": "tsc --noEmit",
@@ -57,6 +59,9 @@
   "dependencies": {
     "ffmpeg-static": "^5.3.0",
     "twilio": "^5.8.0"
+  },
+  "optionalDependencies": {
+    "@xenova/transformers": "^2.17.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.51.0",

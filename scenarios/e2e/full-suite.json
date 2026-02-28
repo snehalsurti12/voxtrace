@@ -1,6 +1,15 @@
 {
   "name": "SCV Full End-to-End Suite",
   "stopOnFailure": false,
+  "connectionSetId": "personal",
+  "vocabulary": {
+    "agentApp": "Service Console",
+    "supervisorSurface": "Command Center for Service",
+    "omniStatus": "Available",
+    "defaultQueue": "SCV Basic Queue",
+    "supportQueue": "Support Queue",
+    "entryNumber": "+18005550199"
+  },
   "scenarios": [
     {
       "id": "inbound-agent-offer",
@@ -12,11 +21,11 @@
       "env": {
         "CALL_TRIGGER_MODE": "connect_ccp",
         "CALL_EXPECTATION": "agent_offer",
+        "CONNECT_CCP_IVR_MODE": "speech",
         "VERIFY_SUPERVISOR_QUEUE_WAITING": "false",
         "VERIFY_SUPERVISOR_AGENT_OFFER": "false",
         "VOICE_RING_TIMEOUT_SEC": "${E2E_RING_TIMEOUT_SEC:-90}",
-        "CONNECT_CCP_IVR_DIGITS": "${E2E_BASELINE_DTMF:-}",
-        "CONNECT_CCP_DTMF_MIN_CALL_ELAPSED_SEC": "${E2E_DTMF_MIN_CALL_ELAPSED_SEC:-5}"
+        "CONNECT_CCP_IVR_DIGITS": "${E2E_BASELINE_DTMF:-}"
       }
     },
     {
@@ -29,11 +38,8 @@
       "env": {
         "CALL_TRIGGER_MODE": "connect_ccp",
         "CALL_EXPECTATION": "agent_offer",
-        "CONNECT_CCP_IVR_DIGITS": "${E2E_SUPPORT_DTMF:-1}",
-        "CONNECT_CCP_DTMF_MIN_CALL_ELAPSED_SEC": "${E2E_DTMF_MIN_CALL_ELAPSED_SEC:-5}",
-        "CONNECT_CCP_IVR_INITIAL_DELAY_MS": "${E2E_SUPPORT_DTMF_DELAY_MS:-3500}",
-        "CONNECT_CCP_IVR_INTER_DIGIT_DELAY_MS": "${E2E_DTMF_INTER_DIGIT_DELAY_MS:-450}",
-        "CONNECT_CCP_IVR_POST_DELAY_MS": "${E2E_DTMF_POST_DELAY_MS:-1200}",
+        "CONNECT_CCP_IVR_MODE": "speech",
+        "CONNECT_CCP_IVR_STEPS": "[{\"dtmf\":\"1\",\"label\":\"Support Queue\"}]",
         "VERIFY_SUPERVISOR_QUEUE_WAITING": "true",
         "SUPERVISOR_QUEUE_NAME": "${SUPERVISOR_QUEUE_SUPPORT_NAME:-Support Queue}",
         "VERIFY_SUPERVISOR_AGENT_OFFER": "true",
@@ -61,6 +67,7 @@
       "env": {
         "CALL_TRIGGER_MODE": "connect_ccp",
         "CALL_EXPECTATION": "agent_offer",
+        "CONNECT_CCP_IVR_MODE": "speech",
         "CONNECT_CCP_IVR_DIGITS": "",
         "VERIFY_SUPERVISOR_QUEUE_WAITING": "true",
         "SUPERVISOR_QUEUE_NAME": "${SUPERVISOR_QUEUE_BASIC_NAME:-SCV Basic Queue}",

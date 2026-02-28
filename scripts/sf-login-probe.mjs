@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { chromium } from "playwright";
 
 async function main() {
@@ -13,6 +14,7 @@ async function main() {
   const storageStatePath = process.env.SF_STORAGE_STATE || ".auth/sf-agent.json";
   const cookiesPath = process.env.SF_COOKIES_PATH || ".auth/sf-cookies.json";
   const emailCode = process.env.SF_EMAIL_CODE ?? "";
+  const totpSecret = (process.env.SF_TOTP_SECRET || "").trim();
 
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
@@ -26,13 +28,13 @@ async function main() {
   ]);
   await page.waitForTimeout(1500);
 
-  await completeIdentityVerificationIfPresent(page, emailCode);
+  await completeIdentityVerificationIfPresent(page, emailCode, totpSecret);
 
   const finishLoginLink = page.getByRole("link", { name: /finish logging in/i }).first();
   if ((await finishLoginLink.count()) > 0) {
     await Promise.all([page.waitForLoadState("domcontentloaded"), finishLoginLink.click()]);
     await page.waitForTimeout(1500);
-    await completeIdentityVerificationIfPresent(page, emailCode);
+    await completeIdentityVerificationIfPresent(page, emailCode, totpSecret);
   }
 
   const startTarget = resolveSalesforceStartTarget({
@@ -54,7 +56,7 @@ async function main() {
     const finishLink = page.getByRole("link", { name: /finish logging in/i }).first();
     await Promise.all([page.waitForLoadState("domcontentloaded"), finishLink.click()]);
     await page.waitForTimeout(1000);
-    await completeIdentityVerificationIfPresent(page, emailCode);
+    await completeIdentityVerificationIfPresent(page, emailCode, totpSecret);
     await page.goto(startTarget, { waitUntil: "domcontentloaded" });
   }
 
@@ -168,13 +170,20 @@ function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-async function completeIdentityVerificationIfPresent(page, emailCode) {
+async function completeIdentityVerificationIfPresent(page, emailCode, totpSecret) {
   if (!page.url().includes("/_ui/identity/verification/")) {
     return;
   }
 
+  // Try TOTP (authenticator app) first if secret is available
+  if (totpSecret) {
+    const usedTotp = await tryTotpVerification(page, totpSecret);
+    if (usedTotp) return;
+    // If TOTP UI wasn't found, fall through to email code path
+  }
+
   if (!emailCode) {
-    throw new Error("Identity verification page detected but SF_EMAIL_CODE is missing.");
+    throw new Error("Identity verification page detected but neither SF_TOTP_SECRET nor SF_EMAIL_CODE is available.");
   }
 
   const selectors = [
@@ -227,6 +236,125 @@ async function completeIdentityVerificationIfPresent(page, emailCode) {
     throw new Error(`Verification code was not accepted.${suffix}`);
   }
 }
+
+async function tryTotpVerification(page, totpSecret) {
+  // Salesforce shows verification method options — look for "Authenticator App" or TOTP option
+  const totpOption = page.locator([
+    "a:has-text('One-Time Password Generator')",
+    "a:has-text('Authenticator App')",
+    "a:has-text('TOTP')",
+    "input[value*='totp']",
+    "input[value*='authenticator']",
+    "[data-method='totp']",
+    "[data-method='otp']"
+  ].join(", ")).first();
+
+  if ((await totpOption.count()) > 0) {
+    console.log("TOTP: Selecting authenticator app verification method...");
+    await totpOption.click();
+    await page.waitForTimeout(1500);
+  }
+
+  // Check if we're on a TOTP code entry page (may already be there or after clicking option)
+  const codeInput = page.locator([
+    "input[name*='code']",
+    "input[id*='code']",
+    "input[id*='otp']",
+    "input[type='text']",
+    "input[type='tel']"
+  ].join(", ")).first();
+
+  if ((await codeInput.count()) === 0) {
+    console.log("TOTP: No code input found on verification page.");
+    await page.screenshot({ path: "test-results/totp-no-input.png", fullPage: true });
+    return false;
+  }
+
+  const code = generateTotpCode(totpSecret);
+  console.log(`TOTP: Generated code ${code}, submitting...`);
+  await codeInput.fill(code);
+
+  const submitButton = page.getByRole("button", { name: /verify|continue|submit|next/i }).first();
+  if ((await submitButton.count()) > 0) {
+    await Promise.all([page.waitForLoadState("domcontentloaded"), submitButton.click()]);
+  } else {
+    const submitInput = page.locator("input[type='submit'][value*='Verify'], #save").first();
+    if ((await submitInput.count()) > 0) {
+      await Promise.all([page.waitForLoadState("domcontentloaded"), submitInput.click()]);
+    } else {
+      await page.keyboard.press("Enter");
+      await page.waitForTimeout(1000);
+    }
+  }
+
+  await page.waitForTimeout(1200);
+
+  if (page.url().includes("/_ui/identity/verification/")) {
+    const errors = (
+      await page
+        .locator(".message.errorM3, .oneError, [id*='error'], .error")
+        .allTextContents()
+        .catch(() => [])
+    )
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .join(" | ");
+    console.log(`TOTP: Verification failed. ${errors || "Still on verification page."}`);
+    await page.screenshot({ path: "test-results/totp-failed.png", fullPage: true });
+    return false;
+  }
+
+  console.log("TOTP: Verification succeeded.");
+  return true;
+}
+
+function generateTotpCode(secret) {
+  // RFC 6238 TOTP: HMAC-SHA1 over counter derived from current time
+  const period = 30;
+  const digits = 6;
+  const counter = Math.floor(Date.now() / 1000 / period);
+
+  // Decode base32 secret
+  const key = base32Decode(secret);
+
+  // Counter as 8-byte big-endian buffer
+  const counterBuf = Buffer.alloc(8);
+  counterBuf.writeUInt32BE(Math.floor(counter / 0x100000000), 0);
+  counterBuf.writeUInt32BE(counter & 0xffffffff, 4);
+
+  // HMAC-SHA1
+  const hmac = crypto.createHmac("sha1", key);
+  hmac.update(counterBuf);
+  const hash = hmac.digest();
+
+  // Dynamic truncation
+  const offset = hash[hash.length - 1] & 0x0f;
+  const binary =
+    ((hash[offset] & 0x7f) << 24) |
+    ((hash[offset + 1] & 0xff) << 16) |
+    ((hash[offset + 2] & 0xff) << 8) |
+    (hash[offset + 3] & 0xff);
+
+  const otp = binary % 10 ** digits;
+  return otp.toString().padStart(digits, "0");
+}
+
+function base32Decode(encoded) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const cleaned = encoded.replace(/[\s=]/g, "").toUpperCase();
+  let bits = "";
+  for (const ch of cleaned) {
+    const val = alphabet.indexOf(ch);
+    if (val === -1) throw new Error(`Invalid base32 character: ${ch}`);
+    bits += val.toString(2).padStart(5, "0");
+  }
+  const bytes = [];
+  for (let i = 0; i + 8 <= bits.length; i += 8) {
+    bytes.push(parseInt(bits.slice(i, i + 8), 2));
+  }
+  return Buffer.from(bytes);
+}
+
 
 function must(name) {
   const value = process.env[name];

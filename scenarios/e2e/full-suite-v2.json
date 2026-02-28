@@ -2,9 +2,19 @@
   "name": "SCV Full End-to-End Suite",
   "version": 2,
   "stopOnFailure": false,
+  "connectionSetId": "personal",
+  "vocabulary": {
+    "agentApp": "Service Console",
+    "supervisorSurface": "Command Center for Service",
+    "omniStatus": "Available",
+    "defaultQueue": "SCV Basic Queue",
+    "supportQueue": "Support Queue",
+    "entryNumber": "+18005550199"
+  },
   "defaults": {
     "callTrigger": {
-      "mode": "connect_ccp"
+      "mode": "connect_ccp",
+      "ivrMode": "speech"
     },
     "timeouts": {
       "ringSec": 90,
@@ -18,8 +28,7 @@
       "id": "inbound-agent-offer",
       "description": "Direct inbound call — agent accepts, VoiceCall screen pop appears.",
       "callTrigger": {
-        "mode": "connect_ccp",
-        "entryNumber": "+18005550199"
+        "mode": "connect_ccp"
       },
       "steps": [
         {
@@ -57,12 +66,9 @@
       "allowFailure": true,
       "callTrigger": {
         "mode": "connect_ccp",
-        "entryNumber": "+18005550199",
-        "ivrDigits": "1",
-        "ivrInitialDelayMs": 4000,
-        "ivrInterDigitDelayMs": 450,
-        "ivrPostDelayMs": 1200,
-        "dtmfMinCallElapsedSec": 5
+        "ivrSteps": [
+          { "dtmf": "1", "label": "Support Queue" }
+        ]
       },
       "steps": [
         {
@@ -117,12 +123,7 @@
       "allowFailure": true,
       "callTrigger": {
         "mode": "connect_ccp",
-        "entryNumber": "+18005550199",
-        "ivrDigits": "",
-        "ivrInitialDelayMs": 4000,
-        "ivrInterDigitDelayMs": 450,
-        "ivrPostDelayMs": 1200,
-        "dtmfMinCallElapsedSec": 5
+        "ivrDigits": ""
       },
       "steps": [
         {
@@ -175,17 +176,15 @@
       "callTrigger": {
         "mode": "connect_ccp",
         "routingType": "skill",
-        "ivrDigits": "2",
+        "ivrSteps": [
+          { "dtmf": "2", "label": "Spanish" }
+        ],
         "requiredSkills": [
           {
             "name": "Spanish",
             "minLevel": 3
           }
-        ],
-        "ivrInitialDelayMs": 3500,
-        "ivrInterDigitDelayMs": 450,
-        "ivrPostDelayMs": 1200,
-        "dtmfMinCallElapsedSec": 5
+        ]
       },
       "steps": [
         {
@@ -269,17 +268,9 @@
       "callTrigger": {
         "mode": "connect_ccp",
         "routingType": "queue",
-        "ivrSequence": [
-          {
-            "digits": "1",
-            "label": "English",
-            "delayBeforeMs": 4000
-          },
-          {
-            "digits": "3",
-            "label": "Billing",
-            "delayBeforeMs": 2000
-          }
+        "ivrSteps": [
+          { "dtmf": "1", "label": "English" },
+          { "dtmf": "3", "label": "Billing" }
         ]
       },
       "steps": [
@@ -295,20 +286,6 @@
         },
         {
           "action": "trigger_call"
-        },
-        {
-          "action": "send_dtmf_sequence",
-          "digits": "1",
-          "delayBeforeMs": 4000
-        },
-        {
-          "action": "wait_for_ivr_prompt",
-          "timeoutSec": 10
-        },
-        {
-          "action": "send_dtmf_sequence",
-          "digits": "3",
-          "delayBeforeMs": 500
         },
         {
           "action": "detect_incoming",
@@ -466,10 +443,10 @@
       "allowFailure": true,
       "callTrigger": {
         "mode": "connect_ccp",
-        "ivrDigits": "1",
         "noAgentBehavior": "callback",
-        "ivrInitialDelayMs": 3500,
-        "dtmfMinCallElapsedSec": 5
+        "ivrSteps": [
+          { "dtmf": "1", "label": "Callback" }
+        ]
       },
       "steps": [
         {

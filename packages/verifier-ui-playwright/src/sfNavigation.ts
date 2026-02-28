@@ -146,12 +146,31 @@ export async function assertAuthenticatedConsolePage(page: Page): Promise<void> 
 
 export async function isInSalesforceApp(page: Page, appName: string): Promise<boolean> {
   const appRegex = new RegExp(escapeRegex(appName), "i");
+  // Check Lightning app name in the navigation bar header (most reliable)
+  const navBarAppName = page.locator(
+    "one-app-nav-bar span.slds-var-p-right_x-small, " +
+    "one-app-nav-bar .appName, " +
+    "one-app-nav-bar .slds-context-bar__label-action span, " +
+    "div.appName span, " +
+    "span.appName"
+  ).first();
+  if ((await navBarAppName.count()) > 0) {
+    const text = await navBarAppName.innerText().catch(() => "");
+    if (appRegex.test(text.trim())) {
+      return true;
+    }
+  }
+  // Fallback: check page title or heading
   const heading = page.getByRole("heading", { name: appRegex }).first();
   if ((await heading.count()) > 0) {
     return true;
   }
-  const text = await page.locator("body").innerText().catch(() => "");
-  return appRegex.test(text);
+  // Fallback: check the document title which Lightning sets to "App Name | Salesforce"
+  const title = await page.title().catch(() => "");
+  if (appRegex.test(title.split("|")[0].trim())) {
+    return true;
+  }
+  return false;
 }
 
 export async function waitForSalesforceApp(page: Page, appName: string, timeoutMs: number): Promise<boolean> {
@@ -200,6 +219,19 @@ export async function ensureSalesforceApp(page: Page, appName: string): Promise<
     }
   }
 
+  // Dismiss any blocking dialogs (Guidance Center, Welcome modals) before App Launcher
+  for (const btn of [
+    page.getByRole("button", { name: /^dismiss$/i }).first(),
+    page.locator("div[role='dialog'] button[title='Close' i]").first(),
+    page.getByRole("button", { name: /^not now$/i }).first(),
+    page.getByRole("button", { name: /^maybe later$/i }).first(),
+  ]) {
+    if ((await btn.count().catch(() => 0)) > 0 && (await btn.isVisible().catch(() => false))) {
+      await btn.click({ force: true }).catch(() => undefined);
+      await page.waitForTimeout(400);
+    }
+  }
+
   const appLauncher = page
     .getByRole("button", { name: /app launcher/i })
     .or(page.getByText(/app launcher/i))
@@ -216,18 +248,24 @@ export async function ensureSalesforceApp(page: Page, appName: string): Promise<
       await page.waitForTimeout(600);
     }
     const appRegex = new RegExp(escapeRegex(appName), "i");
-    const appResult = page.getByRole("link", { name: appRegex }).first();
-    if ((await appResult.count()) > 0) {
-      await Promise.all([page.waitForLoadState("domcontentloaded"), appResult.click({ force: true })]);
-      await page.waitForTimeout(1200);
-    } else {
-      const appResultButton = page.getByRole("button", { name: appRegex }).first();
-      if ((await appResultButton.count()) > 0) {
-        await Promise.all([
-          page.waitForLoadState("domcontentloaded"),
-          appResultButton.click({ force: true })
-        ]);
+    // Lightning App Launcher uses custom components — try multiple locator strategies
+    const appResultCandidates = [
+      page.getByRole("link", { name: appRegex }).first(),
+      page.getByRole("option", { name: appRegex }).first(),
+      page.getByRole("menuitem", { name: appRegex }).first(),
+      page.getByRole("button", { name: appRegex }).first(),
+      // Lightning one-app-launcher-menu-item with matching text
+      page.locator("one-app-launcher-menu-item a, one-app-launcher-app-tile a").filter({ hasText: appRegex }).first(),
+      // Fallback: any clickable element with the app name inside the App Launcher
+      page.locator(".appTileTitle, .slds-truncate").filter({ hasText: appRegex }).first(),
+    ];
+    let clicked = false;
+    for (const candidate of appResultCandidates) {
+      if ((await candidate.count()) > 0 && (await candidate.isVisible().catch(() => false))) {
+        await Promise.all([page.waitForLoadState("domcontentloaded"), candidate.click({ force: true })]);
         await page.waitForTimeout(1200);
+        clicked = true;
+        break;
       }
     }
   }

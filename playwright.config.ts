@@ -15,7 +15,8 @@ const videoMode = (process.env.PW_VIDEO_MODE ?? "retain-on-failure") as
 const fakeAudioFile = process.env.PW_FAKE_AUDIO_FILE?.trim();
 const chromiumArgs = [
   ...(useFakeMedia ? ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"] : []),
-  ...(fakeAudioFile ? [`--use-file-for-fake-audio-capture=${path.resolve(fakeAudioFile)}`] : [])
+  ...(fakeAudioFile ? [`--use-file-for-fake-audio-capture=${path.resolve(fakeAudioFile)}`] : []),
+  "--autoplay-policy=no-user-gesture-required",
 ];
 
 export default defineConfig({

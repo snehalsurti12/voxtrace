@@ -76,12 +76,19 @@ export async function startSupervisorQueueObserver(args: {
   await gotoWithLightningRedirectTolerance(page, args.targetUrl);
   await assertAuthenticatedConsolePage(page);
   let resolvedApp = args.appName;
+  // Build app candidates: prioritize the supervisor surface name (e.g. "Command
+  // Center for Service") as an app target BEFORE falling back to "Service Console".
+  // The previous approach tried "Service Console" first and succeeded immediately
+  // (page was already there) — but stayed on the Home page without supervisor views.
+  const appCandidates = [
+    args.supervisorSurfaceName,
+    args.supervisorAppName,
+    "Omni Supervisor",
+    "Command Center for Service",
+    args.appName
+  ].filter((name) => name.trim().length > 0);
   try {
-    resolvedApp = await ensureAnySalesforceApp(page, [
-      args.appName,
-      args.supervisorAppName,
-      "Omni Supervisor"
-    ]);
+    resolvedApp = await ensureAnySalesforceApp(page, appCandidates);
   } catch {
     // Same-context tabs may fail to switch apps when agent presence is "Available for Voice".
     // Dismiss the error banner and continue — the supervisor surface may still be accessible.
@@ -90,13 +97,21 @@ export async function startSupervisorQueueObserver(args: {
   const skipQueueBacklog = /^(true|1|yes|on)$/i.test(
     (process.env.SUPERVISOR_SKIP_QUEUE_BACKLOG ?? "false").trim()
   );
-  await ensureOmniSupervisorSurfaceOpen(page, args.queueName, args.supervisorSurfaceName);
-  if (!skipQueueBacklog) {
-    await ensureSupervisorQueuesBacklogSurfaceOpen(page, args.queueName).catch(() => undefined);
-  }
   const allowInProgressFallback = !/^(false|0|no|off)$/i.test(
     (process.env.SUPERVISOR_ALLOW_IN_PROGRESS_FALLBACK ?? "false").trim()
   );
+  // When the in-progress fallback is enabled, don't let surface discovery
+  // failure abort the supervisor — the in-progress work table may still be
+  // reachable even when the full Command Center / Omni Supervisor app is
+  // inaccessible (common in same-context multi-tab setups).
+  if (allowInProgressFallback) {
+    await ensureOmniSupervisorSurfaceOpen(page, args.queueName, args.supervisorSurfaceName).catch(() => undefined);
+  } else {
+    await ensureOmniSupervisorSurfaceOpen(page, args.queueName, args.supervisorSurfaceName);
+  }
+  if (!skipQueueBacklog) {
+    await ensureSupervisorQueuesBacklogSurfaceOpen(page, args.queueName).catch(() => undefined);
+  }
 
   const baseline = skipQueueBacklog
     ? 0
@@ -176,12 +191,15 @@ export async function startSupervisorAgentObserver(args: {
   await gotoWithLightningRedirectTolerance(page, args.targetUrl);
   await assertAuthenticatedConsolePage(page);
   let resolvedApp = args.appName;
+  const appCandidates = [
+    args.supervisorSurfaceName,
+    args.supervisorAppName,
+    "Omni Supervisor",
+    "Command Center for Service",
+    args.appName
+  ].filter((name) => name.trim().length > 0);
   try {
-    resolvedApp = await ensureAnySalesforceApp(page, [
-      args.appName,
-      args.supervisorAppName,
-      "Omni Supervisor"
-    ]);
+    resolvedApp = await ensureAnySalesforceApp(page, appCandidates);
   } catch {
     await dismissPresenceAppSwitchBanner(page);
   }
@@ -262,6 +280,7 @@ export async function ensureOmniSupervisorSurfaceOpen(
   const deadline = Date.now() + Math.max(15_000, Number(process.env.SUPERVISOR_SURFACE_WAIT_SEC ?? 30) * 1000);
   let lastSource = "none";
   let launcherAttempted = false;
+  let urlNavigationAttempted = false;
   while (Date.now() < deadline) {
     const discovered = await discoverQueueBacklogSurface(page, queueName);
     if (discovered.found) {
@@ -276,6 +295,51 @@ export async function ensureOmniSupervisorSurfaceOpen(
       launcherAttempted = true;
       const postLauncher = await discoverQueueBacklogSurface(page, queueName);
       if (postLauncher.found) {
+        return;
+      }
+      if (await isSurfaceTabSelected(page, surfaceRegex)) {
+        return;
+      }
+    }
+    // Navigation Menu fallback: open the app's navigation menu and look for
+    // Omni Supervisor or Command Center items. This finds navigation items
+    // available in the current app without needing separate app permissions.
+    if (!urlNavigationAttempted) {
+      urlNavigationAttempted = true;
+      const navMenuButton = page.getByRole("button", { name: /show navigation menu/i }).first();
+      if ((await navMenuButton.count()) > 0 && (await navMenuButton.isVisible().catch(() => false))) {
+        await navMenuButton.click({ force: true }).catch(() => undefined);
+        await page.waitForTimeout(500);
+        const navItemRegex = /omni.?supervisor|command center|queue/i;
+        const navItems = [
+          page.locator("[role='menuitem'], [role='option'], a").filter({ hasText: navItemRegex }).first(),
+          page.locator("[role='menuitem'], [role='option'], a").filter({ hasText: surfaceRegex }).first()
+        ];
+        for (const item of navItems) {
+          if ((await item.count()) > 0 && (await item.isVisible().catch(() => false))) {
+            await item.click({ force: true }).catch(() => undefined);
+            await page.waitForTimeout(2000);
+            const postNav = await discoverQueueBacklogSurface(page, queueName);
+            if (postNav.found || postNav.score >= 4) {
+              return;
+            }
+            if (await isSurfaceTabSelected(page, surfaceRegex)) {
+              return;
+            }
+            break;
+          }
+        }
+        // Close the nav menu if it's still open and no item was found.
+        await page.keyboard.press("Escape").catch(() => undefined);
+        await page.waitForTimeout(200);
+      }
+      // URL-based fallback: try the standard Omni Supervisor navigation tab.
+      const baseUrl = page.url().replace(/\/lightning\/.*$/i, "");
+      const omniSupervisorUrl = `${baseUrl}/lightning/n/standard-OmniSupervisor`;
+      await page.goto(omniSupervisorUrl, { waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => undefined);
+      await page.waitForTimeout(2500);
+      const postNav = await discoverQueueBacklogSurface(page, queueName);
+      if (postNav.found || postNav.score >= 4) {
         return;
       }
       if (await isSurfaceTabSelected(page, surfaceRegex)) {
@@ -306,7 +370,7 @@ export async function openSupervisorSurfaceFromAppLauncher(page: Page, surfaceNa
   if ((await search.count()) > 0 && (await search.isVisible().catch(() => false))) {
     const query = surfaceName.trim() || "Command Center for Service";
     await search.fill(query).catch(() => undefined);
-    await page.waitForTimeout(400);
+    await page.waitForTimeout(800);
   }
 
   const surfaceRegex = surfaceName.trim()
@@ -335,6 +399,34 @@ export async function openSupervisorSurfaceFromAppLauncher(page: Page, surfaceNa
     await page.waitForTimeout(450);
     await closeAppLauncherIfOpen(page).catch(() => undefined);
     return;
+  }
+
+  // Fallback: if the primary search didn't find the surface, try "Omni Supervisor".
+  if (surfaceName.trim() && !/omni.?supervisor/i.test(surfaceName)) {
+    if ((await search.count()) > 0 && (await search.isVisible().catch(() => false))) {
+      await search.fill("Omni Supervisor").catch(() => undefined);
+      await page.waitForTimeout(800);
+      const fallbackCandidates = [
+        page.getByRole("link", { name: /omni.?supervisor/i }).first(),
+        page.getByRole("button", { name: /omni.?supervisor/i }).first(),
+        page
+          .locator("[role='option'], [role='menuitem'], a, button, span")
+          .filter({ hasText: /omni.?supervisor/i })
+          .first()
+      ];
+      for (const candidate of fallbackCandidates) {
+        if ((await candidate.count()) === 0) {
+          continue;
+        }
+        if (!(await candidate.isVisible().catch(() => false))) {
+          continue;
+        }
+        await candidate.click({ force: true }).catch(() => undefined);
+        await page.waitForTimeout(450);
+        await closeAppLauncherIfOpen(page).catch(() => undefined);
+        return;
+      }
+    }
   }
 
   await closeAppLauncherIfOpen(page).catch(() => undefined);

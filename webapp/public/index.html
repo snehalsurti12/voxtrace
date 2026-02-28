@@ -22,7 +22,13 @@
         <button class="btn btn-ghost btn-sm" id="btn-suite-settings" title="Suite settings">&#x2699;</button>
         <button class="btn btn-outline btn-sm" id="btn-suite-create">+ Suite</button>
         <div class="top-divider"></div>
-        <button class="btn btn-outline btn-sm" id="btn-connections">Connections</button>
+        <div class="setup-menu" id="setup-menu">
+          <button class="btn btn-ghost btn-sm setup-trigger" id="btn-setup" title="Setup">&#x2699; Setup</button>
+          <div class="setup-dropdown hidden" id="setup-dropdown">
+            <button class="setup-item" id="btn-connections"><span class="setup-item-icon">&#x1F517;</span> Connections</button>
+            <button class="setup-item" id="btn-advanced-settings"><span class="setup-item-icon">&#x2638;</span> Advanced Settings</button>
+          </div>
+        </div>
       </div>
     </header>
 

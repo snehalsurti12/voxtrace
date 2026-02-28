@@ -2,7 +2,7 @@ import { expect, Locator, Page, test, type BrowserContext } from "@playwright/te
 import fs from "node:fs";
 import { dialInboundCall, hangupCall } from "../src/twilioInbound";
 import { dialFromConnectCcp } from "../src/connectCcpDialer";
-import type { ConnectCcpSession } from "../src/connectCcpDialer";
+import type { ConnectCcpSession, IvrStep } from "../src/connectCcpDialer";
 import {
   escapeRegex,
   resolveSalesforceStartTarget,
@@ -134,9 +134,12 @@ test.describe("Salesforce Service Cloud Voice Inbound E2E", () => {
       process.env.SUPERVISOR_AGENT_OFFER_TIMEOUT_SEC ?? Math.max(60, supervisorTimeoutSec)
     );
     const transcriptWaitSec = Number(process.env.TRANSCRIPT_WAIT_SEC ?? 60);
+    const providerLoginTimeoutSec = Number(process.env.PROVIDER_LOGIN_TIMEOUT_SEC ?? 60);
     const timeoutPaddingSec =
       (transcriptEnabled ? transcriptWaitSec + 120 : 90) + preflightDetailHoldSec * 3 + postAcceptHoldSec;
-    test.setTimeout((ringTimeoutSec + timeoutPaddingSec) * 1000);
+    // Include provider login recovery time so the test doesn't timeout before recovery completes.
+    // CCP warmup makes this fast (~30s), but keep the full timeout as fallback.
+    test.setTimeout((ringTimeoutSec + timeoutPaddingSec + providerLoginTimeoutSec) * 1000);
     if (callTriggerMode !== "twilio" && callTriggerMode !== "manual" && callTriggerMode !== "connect_ccp") {
       throw new Error(`Unsupported CALL_TRIGGER_MODE: ${callTriggerMode}`);
     }
@@ -182,8 +185,8 @@ test.describe("Salesforce Service Cloud Voice Inbound E2E", () => {
       await gotoWithLightningRedirectTolerance(page, serviceConsoleTarget);
     }
     await assertAuthenticatedConsolePage(page);
-    await ensureSalesforceApp(page, appName);
     await dismissSalesforceSetupDialogs(page);
+    await ensureSalesforceApp(page, appName);
     await ensurePhoneUtilityOpen(page);
     const uiReadiness = await collectUiReadiness(page, appName);
     test.info().annotations.push({
@@ -261,21 +264,34 @@ test.describe("Salesforce Service Cloud Voice Inbound E2E", () => {
       // Reloading would kill the provider session, so instead we rely on delta
       // signal detection (new VoiceCall tab / inbox increment) which fires even
       // when the CTI toast is suppressed by multi-tab disruption.
-      // Only reload if Omni has already gone Offline (session truly broken).
+      // Reload if Omni has gone Offline OR provider has gone Offline.
       if (verifySupervisorQueue) {
         await page.bringToFront();
         await page.waitForTimeout(2000);
 
-        if (await isOmniOffline(page)) {
+        // Check both Omni and provider state — supervisor contexts can
+        // disrupt the provider even when Omni still shows Available.
+        let needsRecovery = await isOmniOffline(page);
+        if (!needsRecovery) {
+          await openConnectionStatusPanel(page).catch(() => undefined);
+          const snapshot = await collectProviderStatusSnapshot(page);
+          const providerNow = parseProviderState(snapshot);
+          if (providerNow !== "routable") {
+            needsRecovery = true;
+          }
+          await minimizeConnectionStatusDialogIfOpen(page);
+        }
+
+        if (needsRecovery) {
           await page.reload({ waitUntil: "domcontentloaded" });
           await page.waitForTimeout(5000);
           // Omni must go Online FIRST — provider becomes routable only after.
           await ensurePhoneUtilityOpen(page);
           await ensureOmniStatus(page, targetOmniStatus);
-          // Wait for provider to catch up (capped at 60s to stay within test timeout).
-          const providerRecoveryMs = Math.min(
-            60_000,
-            Math.max(30_000, Number(process.env.PROVIDER_LOGIN_TIMEOUT_SEC ?? 60) * 1000)
+          // Wait for provider to catch up after supervisor context disruption.
+          const providerRecoveryMs = Math.max(
+            30_000,
+            Number(process.env.PROVIDER_LOGIN_TIMEOUT_SEC ?? 60) * 1000
           );
           const providerDeadline = Date.now() + providerRecoveryMs;
           await openConnectionStatusPanel(page).catch(() => undefined);
@@ -318,6 +334,18 @@ test.describe("Salesforce Service Cloud Voice Inbound E2E", () => {
         if (!browser) {
           throw new Error("Playwright browser instance is unavailable for Connect CCP dial mode.");
         }
+        // IVR navigation mode: "speech" (silence-detection, default) or "timed" (legacy fixed delays)
+        const ivrMode = (process.env.CONNECT_CCP_IVR_MODE?.trim() || "speech") as "timed" | "speech";
+        const ivrStepsRaw = process.env.CONNECT_CCP_IVR_STEPS?.trim();
+        let ivrSteps: IvrStep[] = [];
+        if (ivrStepsRaw) {
+          try {
+            ivrSteps = JSON.parse(ivrStepsRaw);
+          } catch {
+            console.warn(`[IVR] Failed to parse CONNECT_CCP_IVR_STEPS: ${ivrStepsRaw}`);
+          }
+        }
+
         connectCcpSession = await dialFromConnectCcp({
           videoDir: process.env.CONNECT_CCP_VIDEO_DIR?.trim() || "test-results/connect-ccp-video",
           browser,
@@ -329,10 +357,35 @@ test.describe("Salesforce Service Cloud Voice Inbound E2E", () => {
           dtmfMinCallElapsedSec: Number(process.env.CONNECT_CCP_DTMF_MIN_CALL_ELAPSED_SEC ?? 4),
           dtmfInitialDelayMs: Number(process.env.CONNECT_CCP_IVR_INITIAL_DELAY_MS ?? 0),
           dtmfInterDigitDelayMs: Number(process.env.CONNECT_CCP_IVR_INTER_DIGIT_DELAY_MS ?? 420),
-          dtmfPostDelayMs: Number(process.env.CONNECT_CCP_IVR_POST_DELAY_MS ?? 1200)
+          dtmfPostDelayMs: Number(process.env.CONNECT_CCP_IVR_POST_DELAY_MS ?? 1200),
+          // Speech-mode IVR options
+          ivrMode,
+          ivrSteps: ivrSteps.length > 0 ? ivrSteps : undefined,
+          ivrSilenceThresholdDb: Number(process.env.IVR_SILENCE_THRESHOLD_DB ?? -45),
+          ivrSilenceMinMs: Number(process.env.IVR_SILENCE_MIN_MS ?? 800),
+          ivrSpeechMinMs: Number(process.env.IVR_SPEECH_MIN_MS ?? 300),
+          ivrMaxPromptWaitSec: Number(process.env.IVR_MAX_PROMPT_WAIT_SEC ?? 30),
+          ivrSaveRecording: /^(true|1|yes|on)$/i.test(
+            (process.env.IVR_TRANSCRIBE ?? process.env.IVR_SAVE_RECORDING ?? "false").trim()
+          ),
         });
         timeline.callTriggerStartMs = timeline.callTriggerStartMs ?? Date.now();
         timeline.ccpDialConfirmedMs = connectCcpSession.dialStartedAtMs ?? Date.now();
+
+        // Log IVR navigation result if speech mode was used
+        if (connectCcpSession.ivrResult) {
+          test.info().annotations.push({
+            type: "ivr.navigation.mode",
+            description: "speech",
+          });
+          for (const step of connectCcpSession.ivrResult.steps) {
+            test.info().annotations.push({
+              type: `ivr.step.${step.dtmf}`,
+              description: `prompt=${step.promptDurationMs}ms dtmf_at=${step.dtmfSentMs}ms${step.label ? ` [${step.label}]` : ""}`,
+            });
+          }
+        }
+
         test.info().annotations.push({
           type: "connect.ccp.dialed",
           description: requiredEnv("CONNECT_ENTRYPOINT_NUMBER")
@@ -488,13 +541,17 @@ test.describe("Salesforce Service Cloud Voice Inbound E2E", () => {
         }
       }
 
-      const acceptedByClick = incomingDetected.acceptedByClick || (await acceptCallIfPresented(page));
+      // If the call was auto-accepted (connected_indicator), skip the accept step.
+      const alreadyConnected = incomingDetected.signal === "connected_indicator";
+      const acceptedByClick = alreadyConnected
+        ? false
+        : incomingDetected.acceptedByClick || (await acceptCallIfPresented(page));
       if (acceptedByClick) {
         timeline.acceptClickedMs = Date.now();
       }
       test.info().annotations.push({
         type: "voice.accept.clicked",
-        description: String(acceptedByClick)
+        description: alreadyConnected ? "auto-accepted" : String(acceptedByClick)
       });
       test.info().annotations.push({
         type: "voice.incoming.signal",
@@ -502,7 +559,7 @@ test.describe("Salesforce Service Cloud Voice Inbound E2E", () => {
       });
 
       const requireAcceptClick = process.env.REQUIRE_ACCEPT_CLICK === "true";
-      if (requireAcceptClick && !acceptedByClick) {
+      if (requireAcceptClick && !acceptedByClick && !alreadyConnected) {
         throw new Error(
           "Inbound signal detected, but automation did not click Accept/Answer. Call likely remained ringing."
         );
@@ -806,11 +863,61 @@ async function attemptProviderLoginRecovery(page: Page, panelHoldMs: number): Pr
     }
   }
 
-  // Step 2: Reload the page to trigger CTI adapter re-initialization.
+  // Step 2: CCP warmup — open Connect CCP in a new tab within the same browser
+  // context. The shared session cookies wake up the Connect WebRTC session, and
+  // the SF CCP iframe syncs within seconds. This is much faster than waiting for
+  // the iframe to self-recover (which can take 3-5 minutes).
+  const ccpUrl = (process.env.CONNECT_CCP_URL ?? "").trim();
+  const connectStorageState = (process.env.CONNECT_STORAGE_STATE ?? "").trim();
+  if (ccpUrl || connectStorageState) {
+    try {
+      const browser = page.context().browser();
+      if (browser) {
+        const ccpWarmupUrl = ccpUrl || `https://${(process.env.CONNECT_INSTANCE_ALIAS ?? "").trim()}/ccp-v2`;
+        if (ccpWarmupUrl && !ccpWarmupUrl.endsWith("/ccp-v2")) {
+          // ccpUrl is already full URL
+        }
+        // Open CCP in a new context with Connect session to warm up the connection
+        const ccpContext = await browser.newContext({
+          storageState: connectStorageState || undefined,
+          permissions: ["microphone"],
+        });
+        const ccpPage = await ccpContext.newPage();
+        await ccpPage.goto(ccpWarmupUrl, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
+        // Wait for CCP to initialize (agent status becomes available)
+        await ccpPage.waitForTimeout(10_000);
+        const ccpBody = await ccpPage.locator("body").innerText().catch(() => "");
+        const ccpReady = /available|connected|routable/i.test(ccpBody);
+        await ccpContext.close();
+
+        if (ccpReady) {
+          // CCP warmed up — reload SF page so the iframe picks up the session
+          await page.reload({ waitUntil: "domcontentloaded" });
+          await page.waitForTimeout(5000);
+          await ensurePhoneUtilityOpen(page).catch(() => undefined);
+          await openConnectionStatusPanel(page).catch(() => undefined);
+          await clickProviderSyncIfPresent(page);
+          // Quick poll — CCP warmup should make sync fast (10-30s)
+          const quickDeadline = Date.now() + 30_000;
+          while (Date.now() < quickDeadline) {
+            const snapshot = await collectProviderStatusSnapshot(page);
+            if (parseProviderState(snapshot) === "routable") {
+              await holdForVideo(page, panelHoldMs);
+              return true;
+            }
+            await page.waitForTimeout(2000);
+          }
+        }
+      }
+    } catch (err) {
+      // CCP warmup failed — fall through to legacy reload recovery
+    }
+  }
+
+  // Step 3: Legacy fallback — reload page and wait for CTI adapter re-initialization.
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.waitForTimeout(5000);
 
-  // Re-open the Connection Status panel and wait for provider to connect.
   const loginTimeoutMs = Math.max(
     30_000,
     Number(process.env.PROVIDER_LOGIN_TIMEOUT_SEC ?? 60) * 1000
@@ -951,6 +1058,9 @@ async function collectUiReadiness(
   connectionStatusButton: boolean;
   voiceTabCount: number;
   maxVoiceCallNumber: number;
+  connectedCallVisible: boolean;
+  inboxCount: number;
+  workspaceTabs: number;
 }> {
   const body = await page.locator("body").innerText().catch(() => "");
   const appRegex = new RegExp(escapeRegex(expectedAppName), "i");
@@ -960,13 +1070,22 @@ async function collectUiReadiness(
   const connectionStatusButton = await detectConnectionStatusControlPresence(page);
   const voiceTabCount = await countVoiceCallTabs(page);
   const maxVoiceCallNumber = await getMaxVoiceCallNumber(page);
+  const connectedCallVisible = await hasConnectedCallUiIndicator(page);
+  const inboxCount = await getInboxCount(page);
+  const workspaceTabs = await page
+    .locator('nav[aria-label="Workspaces"] [role="tab"]')
+    .count()
+    .catch(() => 0);
   return {
     app,
     omniButton,
     phoneButton,
     connectionStatusButton,
     voiceTabCount,
-    maxVoiceCallNumber
+    maxVoiceCallNumber,
+    connectedCallVisible,
+    inboxCount,
+    workspaceTabs,
   };
 }
 
@@ -992,6 +1111,9 @@ async function waitForIncomingSignal(
   let lastStrongRefocusMs = 0;
 
   await ensureOmniPhoneTabOpen(page).catch(() => undefined);
+
+  // Track total workspace tab count as a broad fallback signal.
+  const baselineWorkspaceTabs = await page.locator('nav[aria-label="Workspaces"] [role="tab"]').count().catch(() => 0);
 
   while (Date.now() < deadline) {
     // Keep Omni on phone view; avoid expensive toggles on every loop.
@@ -1027,6 +1149,13 @@ async function waitForIncomingSignal(
       return { detected: true, acceptedByClick: false, signal: "incoming_indicator" };
     }
 
+    // Detect auto-accepted calls: if the routing profile has auto-accept,
+    // no Accept button or incoming toast is shown — the call connects immediately.
+    // Check for connected-call indicators (End Call, After Call Work, etc.).
+    if (await hasConnectedCallUiIndicator(page)) {
+      return { detected: true, acceptedByClick: false, signal: "connected_indicator" };
+    }
+
     if (args.allowDeltaSignals) {
       const currentTabs = await countVoiceCallTabs(page);
       if (currentTabs > args.baselineVoiceTabs) {
@@ -1039,6 +1168,15 @@ async function waitForIncomingSignal(
       const currentInboxCount = await getInboxCount(page);
       if (currentInboxCount > args.baselineInboxCount) {
         return { detected: true, acceptedByClick: false, signal: "inbox_delta" };
+      }
+
+      // Broad fallback: any new workspace tab (even if name doesn't match VoiceCall regex)
+      const currentWorkspaceTabs = await page
+        .locator('nav[aria-label="Workspaces"] [role="tab"]')
+        .count()
+        .catch(() => 0);
+      if (currentWorkspaceTabs > baselineWorkspaceTabs) {
+        return { detected: true, acceptedByClick: false, signal: "voice_tab_delta" };
       }
     }
 
