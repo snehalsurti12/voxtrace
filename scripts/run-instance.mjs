@@ -8,6 +8,8 @@ const ACTIVE_PROFILE_PATH = path.resolve(process.cwd(), ".instance-profile");
 const SENSITIVE_KEYS = new Set([
   "AWS_USERNAME",
   "AWS_PASSWORD",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
   "SF_USERNAME",
   "SF_PASSWORD",
   "SF_EMAIL_CODE",

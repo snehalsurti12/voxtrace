@@ -20,6 +20,37 @@ async function main() {
   const storagePath = process.env.CONNECT_STORAGE_STATE || ".auth/connect-ccp.json";
   const timeoutMs = Number(process.env.CONNECT_LOGIN_TIMEOUT_SEC || "420") * 1000;
 
+  // Fast path: use GetFederationToken API if access keys + instance ID are configured.
+  // This skips all AWS Console browser navigation — one API call + one page.goto().
+  const awsAccessKeyId = process.env.AWS_ACCESS_KEY_ID?.trim() || "";
+  const awsSecretAccessKey = process.env.AWS_SECRET_ACCESS_KEY?.trim() || "";
+  const connectInstanceId = process.env.CONNECT_INSTANCE_ID?.trim() || "";
+  if (awsAccessKeyId && awsSecretAccessKey && connectInstanceId) {
+    console.log("Federation API credentials detected. Attempting API-based auth (fast path)...");
+    const result = await tryFederationApiAuth({
+      awsAccessKeyId,
+      awsSecretAccessKey,
+      connectInstanceId,
+      region: consoleRegion || "us-west-2",
+      ccpUrl,
+      storagePath,
+      isHeadless,
+      timeoutMs: Math.min(timeoutMs, 120_000),
+    });
+    if (result.success) {
+      console.log(JSON.stringify({
+        captured: true,
+        method: "federation-api",
+        storagePath,
+        cookiesPath: ".auth/connect-cookies.json",
+        ccpUrl: result.ccpUrl || ccpUrl || null,
+      }, null, 2));
+      return;
+    }
+    console.warn(`[connect-auth] Federation API failed: ${result.error}`);
+    console.warn("[connect-auth] Falling back to browser-based console auth...");
+  }
+
   const browser = await chromium.launch({
     headless: isHeadless,
     args: isHeadless
@@ -1001,6 +1032,108 @@ function must(name) {
     throw new Error(`Missing env var: ${name}`);
   }
   return value;
+}
+
+/**
+ * Fast-path CCP auth via the Amazon Connect GetFederationToken API.
+ * Returns a pre-authenticated SignInUrl — one page.goto() lands on CCP.
+ * Falls back gracefully if the SDK isn't installed or the API call fails.
+ */
+async function tryFederationApiAuth(opts) {
+  let ConnectClient, GetFederationTokenCommand;
+  try {
+    const mod = await import("@aws-sdk/client-connect");
+    ConnectClient = mod.ConnectClient;
+    GetFederationTokenCommand = mod.GetFederationTokenCommand;
+  } catch {
+    return { success: false, error: "@aws-sdk/client-connect not installed" };
+  }
+
+  let signInUrl;
+  try {
+    const client = new ConnectClient({
+      region: opts.region,
+      credentials: {
+        accessKeyId: opts.awsAccessKeyId,
+        secretAccessKey: opts.awsSecretAccessKey,
+      },
+    });
+    const resp = await client.send(
+      new GetFederationTokenCommand({ InstanceId: opts.connectInstanceId })
+    );
+    signInUrl = resp.SignInUrl;
+    if (!signInUrl) {
+      return { success: false, error: "GetFederationToken returned empty SignInUrl" };
+    }
+    console.log(`Federation token obtained. User: ${resp.UserArn || resp.UserId || "unknown"}`);
+  } catch (err) {
+    return { success: false, error: `GetFederationToken: ${err.name}: ${err.message}` };
+  }
+
+  // Launch browser and navigate to the pre-authenticated URL
+  const browser = await chromium.launch({
+    headless: opts.isHeadless ?? true,
+    args: (opts.isHeadless ?? true)
+      ? ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream", "--no-sandbox"]
+      : [],
+  });
+  const context = await browser.newContext({ permissions: ["microphone"] });
+  const page = await context.newPage();
+
+  try {
+    await page.goto(signInUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
+    console.log(`Navigated to federation SignInUrl. Current: ${page.url()}`);
+  } catch (err) {
+    await browser.close();
+    return { success: false, error: `SignInUrl navigation failed: ${err.message}` };
+  }
+
+  // Derive CCP URL from page if not already known, then navigate
+  let resolvedCcpUrl = opts.ccpUrl || deriveCcpUrlFromUrl(page.url()) || "";
+  if (resolvedCcpUrl && !page.url().includes("/ccp-v2")) {
+    await page.goto(resolvedCcpUrl, { waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => {});
+  }
+
+  // CCP health check loop — reuses existing readCcpState()
+  const deadline = Date.now() + (opts.timeoutMs || 120_000);
+  let consecutiveHealthy = 0;
+  while (Date.now() < deadline) {
+    const state = await readCcpState(page).catch(() => null);
+    if (state) {
+      if (!resolvedCcpUrl) resolvedCcpUrl = deriveCcpUrlFromUrl(state.url) || "";
+      await dismissInterruptingDialog(page).catch(() => {});
+
+      if (state.isHealthy) {
+        consecutiveHealthy++;
+        if (consecutiveHealthy >= 3) break;
+      } else {
+        consecutiveHealthy = 0;
+        // If on Connect domain but not healthy, try navigating to CCP
+        if (state.isConnectDomain && resolvedCcpUrl) {
+          await page.goto(resolvedCcpUrl, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => {});
+        }
+      }
+    } else {
+      consecutiveHealthy = 0;
+    }
+    await sleep(2000);
+  }
+
+  if (consecutiveHealthy < 3) {
+    await page.screenshot({ path: "test-results/connect-federation-timeout.png", fullPage: true }).catch(() => {});
+    await browser.close();
+    return { success: false, error: "CCP did not become healthy after federation sign-in" };
+  }
+
+  // Capture session — same format as the browser-based flow
+  fs.mkdirSync(path.dirname(opts.storagePath), { recursive: true });
+  await context.storageState({ path: opts.storagePath });
+  const cookies = await context.cookies();
+  fs.writeFileSync(".auth/connect-cookies.json", JSON.stringify(cookies, null, 2), "utf8");
+  await page.screenshot({ path: "test-results/connect-session-captured.png", fullPage: true }).catch(() => {});
+  await browser.close();
+
+  return { success: true, ccpUrl: resolvedCcpUrl };
 }
 
 void main();
