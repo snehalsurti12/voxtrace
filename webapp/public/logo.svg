@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="grad-primary" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6c5ce7"/>
+      <stop offset="100%" stop-color="#8577ed"/>
+    </linearGradient>
+    <linearGradient id="grad-accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8577ed"/>
+      <stop offset="100%" stop-color="#00cec9"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#6c5ce7" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <!-- Background circle -->
+  <circle cx="256" cy="256" r="240" fill="#0f1117" stroke="url(#grad-primary)" stroke-width="3"/>
+
+  <!-- Inner subtle ring -->
+  <circle cx="256" cy="256" r="220" fill="none" stroke="#1c1f2e" stroke-width="1.5"/>
+
+  <!-- Stylized ear/listening shape — abstract arc on the left -->
+  <path d="M180 180 C140 220, 130 300, 180 340"
+        stroke="url(#grad-accent)" stroke-width="8" stroke-linecap="round" fill="none" opacity="0.6"/>
+  <path d="M160 160 C110 210, 95 310, 160 360"
+        stroke="url(#grad-accent)" stroke-width="6" stroke-linecap="round" fill="none" opacity="0.35"/>
+
+  <!-- Central "A" letterform — stylized, modern -->
+  <g filter="url(#shadow)">
+    <!-- Left leg of A -->
+    <path d="M220 370 L256 150 L260 150"
+          stroke="url(#grad-primary)" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    <!-- Right leg of A -->
+    <path d="M256 150 L260 150 L296 370"
+          stroke="url(#grad-primary)" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  </g>
+
+  <!-- Sound wave arcs emanating from the right -->
+  <g filter="url(#glow)">
+    <path d="M320 210 C345 235, 345 285, 320 310"
+          stroke="#00cec9" stroke-width="7" stroke-linecap="round" fill="none" opacity="0.9"/>
+    <path d="M345 185 C385 220, 385 300, 345 335"
+          stroke="#00cec9" stroke-width="6" stroke-linecap="round" fill="none" opacity="0.6"/>
+    <path d="M368 162 C420 208, 420 312, 368 358"
+          stroke="#00cec9" stroke-width="5" stroke-linecap="round" fill="none" opacity="0.35"/>
+  </g>
+
+  <!-- Small dot at the apex of A — signal indicator -->
+  <circle cx="258" cy="142" r="6" fill="#00cec9" filter="url(#glow)"/>
+</svg>
