@@ -9,10 +9,7 @@
 
 > The first open-source tool that tests across telephony, CRM UI, and backend records simultaneously — no mocks, no stubs, real calls.
 
-![Audrique Demo](artifacts/demo-gif/audrique-demo.gif)
-
-*Scenario Studio visual builder + live E2E test execution against Salesforce Service Cloud Voice + Amazon Connect.*
-
+https://www.youtube.com/watch?v=yukCm70mJ9s&t=5s
 ---
 
 ## What's New in v0.4.0
