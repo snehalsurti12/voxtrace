@@ -61,41 +61,6 @@ Traditional contact center testing is **manual, slow, and siloed**. Each tool co
 | Hold / resume / ACW | Full call lifecycle with disposition |
 | Agentforce (AI agent) | Parallel calls from CCP + Twilio, AI greeting verification, supervisor active count |
 
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                          Scenario Studio                              │
-│         Visual wizard for building test scenarios (localhost:4200)     │
-│      IVR flowchart builder | Skill routing | Business hours | NLP     │
-└────────────────────────┬─────────────────────────────────────────────┘
-                         │ declarative JSON v2
-                         ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                        Agentic Scenario Runner                        │
-│        Reads v2 JSON → orchestrates parallel agents → assertions      │
-│     Step-based execution | Timeline capture | Video evidence          │
-└──────┬──────────────────┬──────────────────┬─────────────────────────┘
-       │                  │                  │
-       ▼                  ▼                  ▼
-┌─────────────┐   ┌──────────────┐   ┌─────────────────┐
-│ Call Agent   │   │ Browser      │   │ Backend          │
-│              │   │ Agents (x3)  │   │ Verifier         │
-│ - Twilio API │   │              │   │                  │
-│ - CCP Dialer │   │ - SF Agent   │   │ - SF SOQL        │
-│ - DTMF Nav   │   │ - CCP Panel  │   │ - Connect CTR    │
-│ - IVR Whisper│   │ - Supervisor │   │ - VoiceCall      │
-│              │   │ - Screen Pop │   │ - AgentWork      │
-│              │   │ - Transcript │   │ - PSR Records    │
-└─────────────┘   └──────────────┘   └─────────────────┘
-```
-
-**Four autonomous agents** work in parallel during each test:
-1. **Call Agent** — Places real calls via Connect CCP or Twilio, sends DTMF, navigates IVR
-2. **SF Agent Browser** — Salesforce console (Omni-Channel status, phone utility, screen pop, transcript)
-3. **CCP Agent Browser** — Amazon Connect softphone (dial confirmation, call state, hold/resume)
-4. **Supervisor Browser** — Command Center (queue monitoring, agent offers, real-time metrics)
-
 ## Quick Start
 
 ### Prerequisites
@@ -157,8 +122,6 @@ Visual wizard for building test scenarios — suite management, connection confi
 - [Scenario Reference](docs/scenario-reference.md) — Step actions, assertion types, full DSL reference
 - [Security](docs/security.md) — Vault integration, credential management, compliance
 - [Video Evidence](docs/video-evidence.md) — Recording pipeline, merge modes, output format
-- [Platform Support](docs/platform-support.md) — Current support matrix, extensibility architecture
-- [Roadmap](docs/roadmap.md) — AI/LLM capabilities, platform expansion plans
 - [Changelog](CHANGELOG.md) — Version history and release notes
 
 ## Contributing
