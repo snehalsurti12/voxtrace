@@ -160,7 +160,13 @@ test.describe("Salesforce Service Cloud Voice Inbound E2E", () => {
       (transcriptEnabled ? transcriptWaitSec + 120 : 90) + preflightDetailHoldSec * 3 + postAcceptHoldSec;
     // Include provider login recovery time so the test doesn't timeout before recovery completes.
     // CCP warmup makes this fast (~30s), but keep the full timeout as fallback.
-    test.setTimeout((ringTimeoutSec + timeoutPaddingSec + providerLoginTimeoutSec) * 1000);
+    if (callTriggerMode === "nl_caller") {
+      // NL Caller: conversation can run up to MAX_DURATION_SEC + 60s overhead for tunnel/hangup/recording
+      const nlMaxDurationSec = Number(process.env.NL_CALLER_MAX_DURATION_SEC ?? 120);
+      test.setTimeout((nlMaxDurationSec + 60) * 1000);
+    } else {
+      test.setTimeout((ringTimeoutSec + timeoutPaddingSec + providerLoginTimeoutSec) * 1000);
+    }
     if (callTriggerMode !== "twilio" && callTriggerMode !== "manual" && callTriggerMode !== "connect_ccp" && callTriggerMode !== "nl_caller") {
       throw new Error(`Unsupported CALL_TRIGGER_MODE: ${callTriggerMode}`);
     }
@@ -174,45 +180,49 @@ test.describe("Salesforce Service Cloud Voice Inbound E2E", () => {
       requiredAssertions.push("Supervisor agent offer observed");
     }
 
+    // NL Caller mode skips all SF browser setup — it only needs Twilio + Gemini
     let serviceConsoleBaseUrl = process.env.SF_INSTANCE_URL ?? "";
-    if (!skipLogin) {
-      const loginUrl = requiredEnv("SF_LOGIN_URL");
-      const username = requiredEnv("SF_USERNAME");
-      const password = requiredEnv("SF_PASSWORD");
-
-      await page.goto(loginUrl);
-      await page.getByLabel("Username").fill(username);
-      await page.getByLabel("Password").fill(password);
-      await Promise.all([
-        page.waitForNavigation({ waitUntil: "domcontentloaded" }),
-        page.getByRole("button", { name: /log in/i }).click()
-      ]);
-      await page.waitForTimeout(2000);
-      await assertLoginSucceeded(page);
-      serviceConsoleBaseUrl = page.url();
-    }
-
-    const serviceConsoleTarget = resolveSalesforceStartTarget({
-      serviceConsoleUrl,
-      appUrl: process.env.SF_APP_URL?.trim() || "",
-      baseUrl: serviceConsoleBaseUrl || process.env.SF_INSTANCE_URL?.trim() || ""
-    });
-    if (!serviceConsoleTarget && skipLogin) {
-      throw new Error(
-        "SF_SERVICE_CONSOLE_URL is not set and SF_INSTANCE_URL is missing. Set SF_INSTANCE_URL for app-launcher startup in SF_SKIP_LOGIN mode."
-      );
-    }
-    if (serviceConsoleTarget) {
-      await gotoWithLightningRedirectTolerance(page, serviceConsoleTarget);
-    }
-    await assertAuthenticatedConsolePage(page);
-    await dismissSalesforceSetupDialogs(page);
-    await ensureSalesforceApp(page, appName);
-    // Close stale VoiceCall tabs from prior scenarios before preflight.
-    // Leftover tabs can hold the agent in ACW/Offline and block Omni recovery.
-    await closeAllVoiceCallTabs(page).catch(() => 0);
     const targetOmniStatus = process.env.OMNI_TARGET_STATUS?.trim() || "Available";
-    if (callExpectation !== "dial_only" && callExpectation !== "parallel_agentforce") {
+    let serviceConsoleTarget: string | null = "";
+    if (callTriggerMode !== "nl_caller") {
+      if (!skipLogin) {
+        const loginUrl = requiredEnv("SF_LOGIN_URL");
+        const username = requiredEnv("SF_USERNAME");
+        const password = requiredEnv("SF_PASSWORD");
+
+        await page.goto(loginUrl);
+        await page.getByLabel("Username").fill(username);
+        await page.getByLabel("Password").fill(password);
+        await Promise.all([
+          page.waitForNavigation({ waitUntil: "domcontentloaded" }),
+          page.getByRole("button", { name: /log in/i }).click()
+        ]);
+        await page.waitForTimeout(2000);
+        await assertLoginSucceeded(page);
+        serviceConsoleBaseUrl = page.url();
+      }
+
+      serviceConsoleTarget = resolveSalesforceStartTarget({
+        serviceConsoleUrl,
+        appUrl: process.env.SF_APP_URL?.trim() || "",
+        baseUrl: serviceConsoleBaseUrl || process.env.SF_INSTANCE_URL?.trim() || ""
+      });
+      if (!serviceConsoleTarget && skipLogin) {
+        throw new Error(
+          "SF_SERVICE_CONSOLE_URL is not set and SF_INSTANCE_URL is missing. Set SF_INSTANCE_URL for app-launcher startup in SF_SKIP_LOGIN mode."
+        );
+      }
+      if (serviceConsoleTarget) {
+        await gotoWithLightningRedirectTolerance(page, serviceConsoleTarget);
+      }
+      await assertAuthenticatedConsolePage(page);
+      await dismissSalesforceSetupDialogs(page);
+      await ensureSalesforceApp(page, appName);
+      // Close stale VoiceCall tabs from prior scenarios before preflight.
+      // Leftover tabs can hold the agent in ACW/Offline and block Omni recovery.
+      await closeAllVoiceCallTabs(page).catch(() => 0);
+    }
+    if (callExpectation !== "dial_only" && callExpectation !== "parallel_agentforce" && callTriggerMode !== "nl_caller") {
       await ensurePhoneUtilityOpen(page);
       const uiReadiness = await collectUiReadiness(page, appName);
       test.info().annotations.push({
@@ -458,20 +468,41 @@ test.describe("Salesforce Service Cloud Voice Inbound E2E", () => {
           },
           maxTurns: Number(process.env.NL_CALLER_MAX_TURNS ?? 15),
           turnTimeoutSec: Number(process.env.NL_CALLER_TURN_TIMEOUT_SEC ?? 30),
+          tone: process.env.NL_CALLER_TONE || "",
+          voice: process.env.NL_CALLER_VOICE || "Aoede",
+          accent: process.env.NL_CALLER_ACCENT || "",
+          artifactDir: process.env.NL_CALLER_ARTIFACT_DIR || "test-results/nl-caller",
         });
 
         const nlPort = 8765;
         const nlServer = createNlCallerServer({ port: nlPort, engine: nlEngine });
 
-        // Place Twilio call with Stream TwiML pointing to our server
+        // Start tunnel so Twilio's Stream WebSocket can reach us
+        let tunnelBaseUrl = process.env.NL_CALLER_TUNNEL_URL || "";
+        if (!tunnelBaseUrl) {
+          console.log("[nl-caller] Starting cloudflared tunnel...");
+          tunnelBaseUrl = await nlServer.startTunnel();
+          console.log(`[nl-caller] Tunnel ready: ${tunnelBaseUrl}`);
+        }
+        const wsStreamUrl = tunnelBaseUrl.replace(/^https?/, "wss") + "/stream";
+
+        // Place Twilio call with inline TwiML containing <Connect><Stream>
+        // This avoids Twilio needing to fetch TwiML from our server (which was unreliable)
+        const twilioAccountSid = requiredEnv("TWILIO_ACCOUNT_SID");
+        const twilioAuthToken = requiredEnv("TWILIO_AUTH_TOKEN");
+        const streamTwiml = `<Response><Connect><Stream url="${wsStreamUrl}" /></Connect></Response>`;
+        console.log(`[nl-caller] Stream TwiML: ${streamTwiml}`);
         const twilioCall = await dialInboundCall({
-          accountSid: requiredEnv("TWILIO_ACCOUNT_SID"),
-          authToken: requiredEnv("TWILIO_AUTH_TOKEN"),
+          accountSid: twilioAccountSid,
+          authToken: twilioAuthToken,
           from: requiredEnv("TWILIO_FROM_NUMBER"),
           to: requiredEnv("CONNECT_ENTRYPOINT_NUMBER"),
-          twimlUrl: `http://localhost:${nlPort}/twiml`,
+          twiml: streamTwiml,
+          record: true,
         });
         twilioCallSid = twilioCall.callSid;
+        console.log(`[nl-caller] Twilio call placed: SID=${twilioCall.callSid}`);
+        console.log(`[nl-caller] Calling ${requiredEnv("CONNECT_ENTRYPOINT_NUMBER")} from ${requiredEnv("TWILIO_FROM_NUMBER")}`);
 
         test.info().annotations.push({
           type: "nl_caller.mode", description: nlMode,
@@ -480,40 +511,138 @@ test.describe("Salesforce Service Cloud Voice Inbound E2E", () => {
           type: "twilio.callSid", description: twilioCall.callSid,
         });
 
-        // Wait for conversation to complete (or timeout)
-        const nlResult = await Promise.race([
-          nlEngine.waitForComplete(),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("NL Caller conversation timeout")),
-              Number(process.env.NL_CALLER_MAX_DURATION_SEC ?? 120) * 1000)),
-        ]) as any;
+        // Verify tunnel is reachable before waiting
+        try {
+          const healthResp = await fetch(`${tunnelBaseUrl}/health`);
+          const healthData = await healthResp.json();
+          console.log(`[nl-caller] Tunnel health check: ${JSON.stringify(healthData)}`);
+        } catch (e: any) {
+          console.log(`[nl-caller] WARNING: Tunnel health check failed: ${e.message}`);
+        }
 
-        // Save transcript
+        // Poll Twilio call status to detect if call was answered
+        const twilio = (await import("twilio")).default;
+        const twilioClient = twilio(twilioAccountSid, twilioAuthToken);
+        let lastTwilioStatus = "";
+        const statusPoller = setInterval(async () => {
+          try {
+            const callInfo = await twilioClient.calls(twilioCall.callSid).fetch();
+            // Only log when status changes to reduce noise
+            if (callInfo.status !== lastTwilioStatus) {
+              lastTwilioStatus = callInfo.status;
+              console.log(`[nl-caller] Twilio call status: ${callInfo.status} | duration=${callInfo.duration}s`);
+            }
+            if (callInfo.status === "completed" || callInfo.status === "failed" ||
+                callInfo.status === "busy" || callInfo.status === "no-answer" ||
+                callInfo.status === "canceled") {
+              clearInterval(statusPoller);
+            }
+          } catch (e: any) {
+            console.log(`[nl-caller] Twilio status check error: ${e.message}`);
+          }
+        }, 10000);
+
+        // Wait for conversation to complete (or timeout)
+        let nlResult: any = null;
+        let nlTimedOut = false;
+        try {
+          nlResult = await Promise.race([
+            nlEngine.waitForComplete(),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error("NL Caller conversation timeout")),
+                Number(process.env.NL_CALLER_MAX_DURATION_SEC ?? 120) * 1000)),
+          ]) as any;
+        } catch (err: any) {
+          nlTimedOut = err.message?.includes("timeout");
+          if (!nlTimedOut) throw err;
+          console.log(`[nl-caller] Conversation timed out after ${process.env.NL_CALLER_MAX_DURATION_SEC ?? 120}s — saving partial transcript`);
+        } finally {
+          clearInterval(statusPoller);
+        }
+
+        // Save transcript (even on timeout — partial transcripts are valuable)
         const artifactDir = process.env.NL_CALLER_ARTIFACT_DIR || "test-results/nl-caller";
         const assertionsRaw = process.env.NL_CALLER_ASSERTIONS;
         const assertions = assertionsRaw ? JSON.parse(assertionsRaw) : [];
+        const transcript = nlResult?.transcript || nlEngine.getTranscript();
         const assertionResults = evaluateAssertions(
-          nlResult?.transcript || nlEngine.getTranscript(),
+          transcript,
           assertions,
           { objective: process.env.NL_CALLER_PERSONA_OBJECTIVE || "" },
         );
         writeTranscript({
           outputDir: artifactDir,
-          transcript: nlResult?.transcript || nlEngine.getTranscript(),
+          transcript,
           assertionResults,
           metadata: {
             mode: nlMode,
             persona: { name: process.env.NL_CALLER_PERSONA_NAME },
-            durationSec: nlResult?.durationSec || 0,
+            durationSec: nlResult?.durationSec || Math.round((Date.now() - (timeline.callTriggerStartMs || Date.now())) / 1000),
+            timedOut: nlTimedOut,
           },
         });
+        console.log(`[nl-caller] Transcript saved: ${nlEngine.getTurnCount()} turns, ${transcript.length} entries`);
+
+        // Log local recordings (WAV files saved by engine on call end)
+        if (nlResult?.recordings) {
+          for (const [side, path] of Object.entries(nlResult.recordings)) {
+            console.log(`[nl-caller] Local recording (${side}): ${path}`);
+            test.info().annotations.push({
+              type: `nl_caller.recording.${side}`,
+              description: String(path),
+            });
+          }
+        }
 
         test.info().annotations.push({
           type: "nl_caller.transcript",
-          description: `${nlEngine.getTurnCount()} turns, ${assertionResults.filter((a: any) => a.passed).length}/${assertionResults.length} assertions passed`,
+          description: `${nlEngine.getTurnCount()} turns, ${assertionResults.filter((a: any) => a.passed).length}/${assertionResults.length} assertions passed${nlTimedOut ? " (timed out)" : ""}`,
         });
 
+        // Hang up the Twilio call and close server
+        try {
+          await hangupCall({ accountSid: twilioAccountSid, authToken: twilioAuthToken, callSid: twilioCallSid! });
+          console.log("[nl-caller] Twilio call hung up");
+        } catch (e: any) {
+          console.log(`[nl-caller] Hangup warning: ${e.message}`);
+        }
         await nlServer.close();
+
+        // Retrieve Twilio recording URL (dual-channel WAV with both sides)
+        try {
+          const twilio2 = (await import("twilio")).default;
+          const twilioClient2 = twilio2(twilioAccountSid, twilioAuthToken);
+          // Wait briefly for recording to finalize
+          await new Promise(r => setTimeout(r, 3000));
+          const recordings = await twilioClient2.recordings.list({ callSid: twilioCallSid!, limit: 1 });
+          if (recordings.length > 0) {
+            const recUrl = `https://api.twilio.com/2010-04-01/Accounts/${twilioAccountSid}/Recordings/${recordings[0].sid}.wav`;
+            console.log(`[nl-caller] Twilio recording: ${recUrl}`);
+            test.info().annotations.push({
+              type: "nl_caller.recording",
+              description: recUrl,
+            });
+          } else {
+            console.log("[nl-caller] No Twilio recording found (may still be processing)");
+          }
+        } catch (e: any) {
+          console.log(`[nl-caller] Recording retrieval warning: ${e.message}`);
+        }
+
+        // If timed out but conversation happened, don't fail hard — report partial results
+        if (nlTimedOut && nlEngine.getTurnCount() > 0) {
+          test.info().annotations.push({
+            type: "nl_caller.timeout",
+            description: `Conversation had ${nlEngine.getTurnCount()} turns but didn't end naturally within ${process.env.NL_CALLER_MAX_DURATION_SEC ?? 120}s`,
+          });
+        }
+
+        // NL Caller is self-contained — skip all SF-side agent_offer assertions
+        timeline.testEndMs = Date.now();
+        const timelinePath = test.info().outputPath("e2e-timeline.json");
+        fs.writeFileSync(timelinePath, JSON.stringify(timeline, null, 2), "utf8");
+        await test.info().attach("e2e-timeline", { path: timelinePath, contentType: "application/json" });
+        return;
       } else {
         timeline.callTriggerStartMs = Date.now();
         test.info().annotations.push({

@@ -38,7 +38,10 @@ export function scenarioToEnv(scenario, defaults = {}) {
 
   // ── Call trigger ──────────────────────────────────────────────────────
   env.CALL_TRIGGER_MODE = callTrigger.mode ?? "connect_ccp";
-  env.CALL_EXPECTATION = callTrigger.expectation ?? "agent_offer";
+  // NL Caller mode always uses "dial_only" expectation — no agent offer/screen pop needed
+  env.CALL_EXPECTATION = callTrigger.mode === "nl_caller"
+    ? (callTrigger.expectation ?? "dial_only")
+    : (callTrigger.expectation ?? "agent_offer");
 
   // ── Dial-only (AI Agent / Agentforce) ─────────────────────────────
   if (callTrigger.expectation === "dial_only" || callTrigger.expectation === "parallel_agentforce") {
@@ -156,6 +159,10 @@ export function scenarioToEnv(scenario, defaults = {}) {
     if (nlCaller.conversation?.length > 0) {
       env.NL_CALLER_CONVERSATION_SCRIPT = JSON.stringify(nlCaller.conversation);
     }
+    // Voice, tone, accent
+    if (nlCaller.tone) env.NL_CALLER_TONE = nlCaller.tone;
+    if (nlCaller.voice) env.NL_CALLER_VOICE = nlCaller.voice;
+    if (nlCaller.accent) env.NL_CALLER_ACCENT = nlCaller.accent;
   }
   // Conversation assertions
   if (scenario.conversationAssertions?.length > 0) {

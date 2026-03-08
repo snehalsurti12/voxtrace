@@ -635,6 +635,30 @@ function scenarioToAnswers(s) {
     allowFailure: !!s.allowFailure,
     enabled: s.enabled !== false,
     customSteps: null,
+    // NL Caller
+    nlCallerMode: s.nlCaller?.conversationMode || "gemini",
+    nlPersonaName: s.nlCaller?.persona?.name || "",
+    nlPersonaAccount: s.nlCaller?.persona?.accountNumber || "",
+    nlPersonaContext: s.nlCaller?.persona?.context || "",
+    nlPersonaObjective: s.nlCaller?.persona?.objective || "",
+    nlMaxTurns: s.nlCaller?.maxTurns || 15,
+    nlTurnTimeout: s.nlCaller?.turnTimeoutSec || 30,
+    nlTone: s.nlCaller?.tone || "neutral",
+    nlVoice: s.nlCaller?.voice || "Aoede",
+    nlAccent: s.nlCaller?.accent || "",
+    nlTopic: s.nlCaller?.topic || "custom",
+    nlScriptSteps: (s.nlCaller?.conversation || []).map((c) => ({
+      keywords: (c.detectKeywords || []).join(", "),
+      say: c.say || "",
+    })),
+    // NL Caller assertions (hydrate from conversationAssertions array)
+    nlAssertGreeting: (s.conversationAssertions || []).some((a) => a.type === "agent_greeted_customer"),
+    nlAssertIssue: (s.conversationAssertions || []).some((a) => a.type === "agent_identified_issue"),
+    nlAssertIssueKeywords: ((s.conversationAssertions || []).find((a) => a.type === "agent_identified_issue")?.keywords || []).join(", "),
+    nlAssertResolution: (s.conversationAssertions || []).some((a) => a.type === "resolution_reached"),
+    nlAssertObjective: (s.conversationAssertions || []).some((a) => a.type === "caller_objective_met"),
+    nlAssertNaturalEnd: (s.conversationAssertions || []).some((a) => a.type === "conversation_ended_naturally"),
+    nlAssertMaxTurns: (s.conversationAssertions || []).some((a) => a.type === "max_turns_not_exceeded"),
   };
 }
 
@@ -716,6 +740,10 @@ function collectCurrentStepAnswers() {
       state.answers.callOutcome = getSelectedOption("call-outcome") || state.answers.callOutcome;
       // NL Caller fields
       state.answers.nlCallerMode = getSelectedOption("nl-caller-mode") || state.answers.nlCallerMode;
+      state.answers.nlTopic = val("nl-topic-preset") || state.answers.nlTopic;
+      state.answers.nlTone = getSelectedOption("nl-tone") || state.answers.nlTone;
+      state.answers.nlVoice = val("nl-voice") || state.answers.nlVoice;
+      state.answers.nlAccent = val("nl-accent") ?? state.answers.nlAccent;
       state.answers.nlPersonaName = val("nl-persona-name") || state.answers.nlPersonaName;
       state.answers.nlPersonaAccount = val("nl-persona-account") || state.answers.nlPersonaAccount;
       state.answers.nlPersonaContext = val("nl-persona-context") || state.answers.nlPersonaContext;
@@ -730,6 +758,14 @@ function collectCurrentStepAnswers() {
         if (keywords || say) scriptSteps.push({ keywords, say });
       });
       if (scriptSteps.length > 0) state.answers.nlScriptSteps = scriptSteps;
+      // NL Caller assertions
+      state.answers.nlAssertGreeting = isChecked("nl-assert-greeting");
+      state.answers.nlAssertIssue = isChecked("nl-assert-issue");
+      state.answers.nlAssertIssueKeywords = val("nl-assert-issue-keywords") || "";
+      state.answers.nlAssertResolution = isChecked("nl-assert-resolution");
+      state.answers.nlAssertObjective = isChecked("nl-assert-objective");
+      state.answers.nlAssertNaturalEnd = isChecked("nl-assert-natural-end");
+      state.answers.nlAssertMaxTurns = isChecked("nl-assert-max-turns");
       // Voicemail fields
       state.answers.voicemailText = val("voicemail-text") || state.answers.voicemailText;
       state.answers.voicemailDurationSec = parseInt(val("voicemail-duration") || String(state.answers.voicemailDurationSec), 10);
@@ -937,6 +973,58 @@ function renderCallStep() {
 
         <!-- Persona (for Gemini/LLM mode) -->
         <div id="nl-caller-persona" style="display: ${a.nlCallerMode === "scripted" ? "none" : "block"};">
+
+          <div class="form-group">
+            <label class="form-label">Topic Preset</label>
+            <select class="form-input" id="nl-topic-preset" style="max-width: 320px;">
+              <option value="custom" ${(a.nlTopic || "custom") === "custom" ? "selected" : ""}>Custom (manual)</option>
+              <option value="billing_dispute" ${a.nlTopic === "billing_dispute" ? "selected" : ""}>Billing Dispute</option>
+              <option value="technical_support" ${a.nlTopic === "technical_support" ? "selected" : ""}>Technical Support</option>
+              <option value="account_inquiry" ${a.nlTopic === "account_inquiry" ? "selected" : ""}>Account Inquiry</option>
+              <option value="service_cancellation" ${a.nlTopic === "service_cancellation" ? "selected" : ""}>Service Cancellation</option>
+              <option value="refund_request" ${a.nlTopic === "refund_request" ? "selected" : ""}>Refund Request</option>
+              <option value="general_inquiry" ${a.nlTopic === "general_inquiry" ? "selected" : ""}>General Inquiry</option>
+            </select>
+            <div class="form-hint">Auto-fills persona context and objective. Choose Custom to write your own.</div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Caller Tone</label>
+            <div class="option-cards" data-name="nl-tone" style="grid-template-columns: repeat(4, 1fr);">
+              ${optionCard("neutral", "Neutral", "Normal conversational tone", (a.nlTone || "neutral") === "neutral")}
+              ${optionCard("frustrated", "Frustrated", "Impatient, expresses dissatisfaction", a.nlTone === "frustrated")}
+              ${optionCard("angry", "Angry", "Firm, raises concerns strongly", a.nlTone === "angry")}
+              ${optionCard("confused", "Confused", "Unsure, asks clarifying questions", a.nlTone === "confused")}
+              ${optionCard("polite", "Polite", "Patient, thanks agent frequently", a.nlTone === "polite")}
+              ${optionCard("elderly", "Elderly", "Speaks slowly, asks to repeat", a.nlTone === "elderly")}
+              ${optionCard("rushed", "Rushed", "In a hurry, wants fast resolution", a.nlTone === "rushed")}
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Voice</label>
+              <select class="form-input" id="nl-voice">
+                <option value="Aoede" ${(a.nlVoice || "Aoede") === "Aoede" ? "selected" : ""}>Aoede (default)</option>
+                <option value="Charon" ${a.nlVoice === "Charon" ? "selected" : ""}>Charon (deeper)</option>
+                <option value="Fenrir" ${a.nlVoice === "Fenrir" ? "selected" : ""}>Fenrir (male)</option>
+                <option value="Kore" ${a.nlVoice === "Kore" ? "selected" : ""}>Kore (female)</option>
+                <option value="Puck" ${a.nlVoice === "Puck" ? "selected" : ""}>Puck (energetic)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Accent</label>
+              <select class="form-input" id="nl-accent">
+                <option value="" ${!a.nlAccent ? "selected" : ""}>None</option>
+                <option value="british" ${a.nlAccent === "british" ? "selected" : ""}>British English</option>
+                <option value="indian" ${a.nlAccent === "indian" ? "selected" : ""}>Indian English</option>
+                <option value="australian" ${a.nlAccent === "australian" ? "selected" : ""}>Australian English</option>
+                <option value="southern_us" ${a.nlAccent === "southern_us" ? "selected" : ""}>Southern US</option>
+                <option value="new_york" ${a.nlAccent === "new_york" ? "selected" : ""}>New York</option>
+              </select>
+            </div>
+          </div>
+
           <div class="form-row">
             <div class="form-group">
               <label class="form-label">Caller Name</label>
@@ -964,6 +1052,85 @@ function renderCallStep() {
               <label class="form-label">Turn Timeout (sec)</label>
               <input type="number" class="form-input" id="nl-turn-timeout" value="${a.nlTurnTimeout || 30}" min="5" max="120" />
             </div>
+          </div>
+
+          <div class="section-divider" style="margin: 12px 0;"></div>
+          <h4 class="step-section-title" style="font-size: 13px;">Conversation Assertions</h4>
+          <div class="form-hint" style="margin-bottom: 8px;">Select which assertions to evaluate after the conversation completes.</div>
+
+          <div class="toggle-row">
+            <div>
+              <div class="tr-label">Agent Greeted Customer</div>
+              <div class="tr-desc">Verify the AI agent greets the caller within the first 2 turns</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="nl-assert-greeting" ${a.nlAssertGreeting ? "checked" : ""} />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="toggle-row">
+            <div>
+              <div class="tr-label">Agent Identified Issue</div>
+              <div class="tr-desc">Verify the agent mentioned relevant keywords</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="nl-assert-issue" ${a.nlAssertIssue ? "checked" : ""} />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="indent-group ${a.nlAssertIssue ? "" : "hidden"}" id="nl-assert-issue-fields">
+            <div class="form-group">
+              <label class="form-label">Issue Keywords</label>
+              <input type="text" class="form-input" id="nl-assert-issue-keywords"
+                     placeholder="refund, charge, billing"
+                     value="${esc(a.nlAssertIssueKeywords || "")}" />
+              <div class="form-hint">Comma-separated keywords to match in agent responses</div>
+            </div>
+          </div>
+
+          <div class="toggle-row">
+            <div>
+              <div class="tr-label">Resolution Reached</div>
+              <div class="tr-desc">Verify resolution language appeared in the conversation</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="nl-assert-resolution" ${a.nlAssertResolution ? "checked" : ""} />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="toggle-row">
+            <div>
+              <div class="tr-label">Caller Objective Met</div>
+              <div class="tr-desc">Verify the agent addressed the caller's stated objective</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="nl-assert-objective" ${a.nlAssertObjective ? "checked" : ""} />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="toggle-row">
+            <div>
+              <div class="tr-label">Conversation Ended Naturally</div>
+              <div class="tr-desc">Verify the call ended with a natural closing (goodbye, thank you)</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="nl-assert-natural-end" ${a.nlAssertNaturalEnd ? "checked" : ""} />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="toggle-row">
+            <div>
+              <div class="tr-label">Max Turns Not Exceeded</div>
+              <div class="tr-desc">Verify the conversation completed within the max turns limit</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="nl-assert-max-turns" ${a.nlAssertMaxTurns ? "checked" : ""} />
+              <span class="slider"></span>
+            </label>
           </div>
         </div>
 
@@ -1175,6 +1342,55 @@ function bindCallOutcomeCards() {
       e.target.closest(".nl-script-step")?.remove();
     }
   });
+
+  // NL Caller topic preset auto-fill
+  const topicPreset = document.getElementById("nl-topic-preset");
+  if (topicPreset) {
+    topicPreset.addEventListener("change", () => {
+      const presets = {
+        billing_dispute: {
+          context: "Customer was charged incorrectly on their last statement and wants the charge reversed.",
+          objective: "Get the incorrect charge reversed and receive confirmation",
+        },
+        technical_support: {
+          context: "Customer's product or service is not working properly and needs troubleshooting assistance.",
+          objective: "Resolve the technical issue and confirm the fix",
+        },
+        account_inquiry: {
+          context: "Customer needs to check their account status, balance, or other account details.",
+          objective: "Get account information and verify details",
+        },
+        service_cancellation: {
+          context: "Customer wants to cancel their subscription or service and close their account.",
+          objective: "Cancel the service and receive cancellation confirmation",
+        },
+        refund_request: {
+          context: "Customer purchased a product or service and wants their money back.",
+          objective: "Process the refund and receive confirmation",
+        },
+        general_inquiry: {
+          context: "Customer has a general question about available products or services.",
+          objective: "Get information about products or services",
+        },
+      };
+      const p = presets[topicPreset.value];
+      if (p) {
+        const ctx = document.getElementById("nl-persona-context");
+        const obj = document.getElementById("nl-persona-objective");
+        if (ctx) ctx.value = p.context;
+        if (obj) obj.value = p.objective;
+      }
+    });
+  }
+
+  // NL Caller assertion: issue keywords toggle
+  const assertIssue = document.getElementById("nl-assert-issue");
+  if (assertIssue) {
+    assertIssue.addEventListener("change", () => {
+      const fields = document.getElementById("nl-assert-issue-fields");
+      if (fields) fields.classList.toggle("hidden", !assertIssue.checked);
+    });
+  }
 
   // Call outcome card toggling — show/hide voicemail, callback, closed hours, dial-only fields
   const outcomeCards = document.querySelectorAll('[data-name="call-outcome"] .option-card');
@@ -2560,7 +2776,24 @@ function answersToScenario() {
         say: s.say || "",
       }));
     }
+    if (a.nlTone && a.nlTone !== "neutral") nlCaller.tone = a.nlTone;
+    if (a.nlVoice && a.nlVoice !== "Aoede") nlCaller.voice = a.nlVoice;
+    if (a.nlAccent) nlCaller.accent = a.nlAccent;
+    if (a.nlTopic && a.nlTopic !== "custom") nlCaller.topic = a.nlTopic;
     scenario.nlCaller = nlCaller;
+
+    // Conversation assertions
+    const convAssertions = [];
+    if (a.nlAssertGreeting) convAssertions.push({ type: "agent_greeted_customer", within_turns: 2 });
+    if (a.nlAssertIssue) {
+      const kws = (a.nlAssertIssueKeywords || "").split(",").map((k) => k.trim()).filter(Boolean);
+      convAssertions.push({ type: "agent_identified_issue", keywords: kws });
+    }
+    if (a.nlAssertResolution) convAssertions.push({ type: "resolution_reached", within_turns: a.nlMaxTurns || 15 });
+    if (a.nlAssertObjective) convAssertions.push({ type: "caller_objective_met" });
+    if (a.nlAssertNaturalEnd) convAssertions.push({ type: "conversation_ended_naturally" });
+    if (a.nlAssertMaxTurns) convAssertions.push({ type: "max_turns_not_exceeded", max_turns: a.nlMaxTurns || 15 });
+    if (convAssertions.length > 0) scenario.conversationAssertions = convAssertions;
   }
 
   // If custom steps from advanced editor, use those directly

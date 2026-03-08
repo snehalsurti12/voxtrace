@@ -1,0 +1,51 @@
+{
+  "name": "NL Caller — Account Inquiry (Gemini Live)",
+  "version": 2,
+  "connectionSetId": "cdo-org",
+  "stopOnFailure": false,
+  "defaults": {
+    "timeouts": {
+      "ringSec": 120
+    }
+  },
+  "scenarios": [
+    {
+      "id": "nl-caller-account-inquiry",
+      "description": "AI caller asks Agentforce about account status using Gemini Live for real-time voice conversation.",
+      "enabled": true,
+      "callTrigger": {
+        "mode": "nl_caller"
+      },
+      "nlCaller": {
+        "conversationMode": "gemini",
+        "maxTurns": 15,
+        "turnTimeoutSec": 30,
+        "topic": "account_inquiry",
+        "tone": "neutral",
+        "voice": "Aoede",
+        "persona": {
+          "name": "Sarah Johnson",
+          "accountNumber": "ACC-78901",
+          "context": "Customer needs to check their account status, balance, and recent activity.",
+          "objective": "Get account information and verify details"
+        }
+      },
+      "conversationAssertions": [
+        { "type": "agent_greeted_customer", "within_turns": 2 },
+        { "type": "agent_identified_issue", "keywords": ["account", "balance", "status", "information"] },
+        { "type": "caller_objective_met" },
+        { "type": "conversation_ended_naturally" },
+        { "type": "max_turns_not_exceeded", "max_turns": 15 }
+      ],
+      "steps": [
+        { "action": "preflight" },
+        { "action": "trigger_call" }
+      ]
+    }
+  ],
+  "vocabulary": {
+    "agentApp": "Service Console",
+    "omniStatus": "Available",
+    "entryNumber": "+18333199528"
+  }
+}
