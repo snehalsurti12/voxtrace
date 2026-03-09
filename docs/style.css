@@ -427,6 +427,33 @@ a:hover { color: var(--text); }
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
 }
+/* Input error state */
+.input-error {
+  border-color: var(--red) !important;
+  box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.12) !important;
+}
+.form-hint {
+  font-size: 0.7rem; min-height: 1rem;
+  color: var(--text-muted); transition: color 0.15s;
+}
+.form-hint-error { color: var(--red); }
+
+/* Form error banner */
+.form-error {
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.2);
+  border-radius: var(--radius-sm);
+  padding: 0.6rem 0.9rem;
+  color: var(--red); font-size: 0.85rem;
+  margin-bottom: 1rem; text-align: center;
+}
+
+/* Turnstile widget */
+.turnstile-wrap {
+  display: flex; justify-content: center;
+  margin-bottom: 1rem;
+}
+
 .trial-submit {
   width: 100%; padding: 0.75rem; font-size: 0.95rem; cursor: pointer;
 }
